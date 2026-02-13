@@ -48,7 +48,7 @@ class LiteLLMProvider(LLMProvider):
         litellm.suppress_debug_info = True
         # Drop unsupported parameters for providers (e.g., gpt-5 rejects some params)
         litellm.drop_params = True
-    
+
     def _setup_env(self, api_key: str, api_base: str | None, model: str) -> None:
         """Set environment variables based on detected provider."""
         spec = self._gateway or find_by_model(model)
@@ -69,7 +69,7 @@ class LiteLLMProvider(LLMProvider):
             resolved = env_val.replace("{api_key}", api_key)
             resolved = resolved.replace("{api_base}", effective_base)
             os.environ.setdefault(env_name, resolved)
-    
+
     def _resolve_model(self, model: str) -> str:
         """Resolve model name by applying provider/gateway prefixes."""
         if self._gateway:
@@ -80,15 +80,15 @@ class LiteLLMProvider(LLMProvider):
             if prefix and not model.startswith(f"{prefix}/"):
                 model = f"{prefix}/{model}"
             return model
-        
+
         # Standard mode: auto-prefix for known providers
         spec = find_by_model(model)
         if spec and spec.litellm_prefix:
             if not any(model.startswith(s) for s in spec.skip_prefixes):
                 model = f"{spec.litellm_prefix}/{model}"
-        
+
         return model
-    
+
     def _apply_model_overrides(self, model: str, kwargs: dict[str, Any]) -> None:
         """Apply model-specific parameter overrides from the registry."""
         model_lower = model.lower()
@@ -98,7 +98,7 @@ class LiteLLMProvider(LLMProvider):
                 if pattern in model_lower:
                     kwargs.update(overrides)
                     return
-    
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -122,6 +122,34 @@ class LiteLLMProvider(LLMProvider):
         """
         model = self._resolve_model(model or self.default_model)
         
+        # Auto-prefix model names for known providers
+        # (keywords, target_prefix, skip_if_starts_with)
+        _prefix_rules = [
+            (("glm", "zhipu"), "zai", ("zhipu/", "zai/", "openrouter/", "hosted_vllm/")),
+            (("qwen", "dashscope"), "dashscope", ("dashscope/", "openrouter/")),
+            (("moonshot", "kimi"), "moonshot", ("moonshot/", "openrouter/")),
+            (("gemini",), "gemini", ("gemini/",)),
+        ]
+        model_lower = model.lower()
+        for keywords, prefix, skip in _prefix_rules:
+            if any(kw in model_lower for kw in keywords) and not any(model.startswith(s) for s in skip):
+                model = f"{prefix}/{model}"
+                break
+
+        # Gateway/endpoint-specific prefixes (detected by api_base/api_key, not model name)
+        if self.is_openrouter and not model.startswith("openrouter/"):
+            model = f"openrouter/{model}"
+        elif self.is_aihubmix:
+            model = f"openai/{model.split('/')[-1]}"
+        elif self.is_vllm:
+            # For vLLM, use hosted_vllm/ prefix per LiteLLM docs
+            # Convert openai/ prefix to hosted_vllm/ if user specified it
+            model = f"hosted_vllm/{model}"
+        
+        # kimi-k2.5 only supports temperature=1.0
+        if "kimi-k2.5" in model.lower():
+            temperature = 1.0
+
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -131,11 +159,11 @@ class LiteLLMProvider(LLMProvider):
         
         # Apply model-specific overrides (e.g. kimi-k2.5 temperature)
         self._apply_model_overrides(model, kwargs)
-        
+
         # Pass api_key directly — more reliable than env vars alone
         if self.api_key:
             kwargs["api_key"] = self.api_key
-        
+
         # Pass api_base for custom endpoints
         if self.api_base:
             kwargs["api_base"] = self.api_base
@@ -189,7 +217,7 @@ class LiteLLMProvider(LLMProvider):
             }
         
         reasoning_content = getattr(message, "reasoning_content", None)
-        
+
         return LLMResponse(
             content=message.content,
             tool_calls=tool_calls,
