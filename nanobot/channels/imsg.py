@@ -101,12 +101,12 @@ class ImsgChannel(BaseChannel):
                 stderr=asyncio.subprocess.PIPE
             )
             stdout, stderr = await proc.communicate()
-            
+
             if proc.returncode != 0:
                 logger.error(f"Failed to send iMessage: {stderr.decode()}")
             else:
                 logger.debug(f"iMessage sent: {stdout.decode().strip()}")
-                
+
         except Exception as e:
             logger.error(f"Error executing imsg send: {e}")
 
@@ -114,11 +114,11 @@ class ImsgChannel(BaseChannel):
         """Poll for new messages."""
         import time
         from datetime import datetime
-        
+
         # Track last processed message time
         # Initialize with current time to avoid processing old history on startup
         last_check_ts = time.time()
-        
+
         while self._running:
             try:
                 # 1. Get recent chats
@@ -128,12 +128,12 @@ class ImsgChannel(BaseChannel):
                     stderr=asyncio.subprocess.PIPE
                 )
                 stdout, _ = await proc.communicate()
-                
+
                 if proc.returncode != 0:
                     logger.warning("Failed to fetch chats")
                     await asyncio.sleep(10)
                     continue
-                
+
                 # Parse NDJSON
                 chats = []
                 for line in stdout.decode().strip().splitlines():
@@ -142,16 +142,16 @@ class ImsgChannel(BaseChannel):
                             chats.append(json.loads(line))
                         except json.JSONDecodeError:
                             pass
-                
+
                 # Track the latest message timestamp seen in this batch
                 max_ts_in_batch = last_check_ts
-                
+
                 for chat in chats:
                     # Check timestamp
                     last_at_str = chat.get("last_message_at")
                     if not last_at_str:
                         continue
-                        
+
                     try:
                         # Parse ISO
                         dt = datetime.fromisoformat(last_at_str.replace('Z', '+00:00'))
@@ -169,51 +169,51 @@ class ImsgChannel(BaseChannel):
                         chat_id = chat.get("id")
                         if not chat_id:
                             continue
-                            
+
                         # Fetch history to get text
                         h_proc = await asyncio.create_subprocess_exec(
-                            "imsg", "history", "--chat-id", str(chat_id), "--limit", "1", "--json",
+                            "imsg", "history", "--chat-id", str(chat_id), "--limit", "10", "--json",
                             stdout=asyncio.subprocess.PIPE,
                             stderr=asyncio.subprocess.PIPE
                         )
                         h_stdout, _ = await h_proc.communicate()
-                        
+
                         if h_proc.returncode != 0:
                             continue
-                            
+
                         # Parse history NDJSON
                         msg_data = None
                         for line in h_stdout.decode().strip().splitlines():
                             if line.strip():
                                 try:
                                     msg_data = json.loads(line)
-                                    break 
+                                    break
                                 except:
                                     pass
-                        
+
                         if not msg_data:
                             continue
-                            
+
                         if msg_data.get("is_from_me"):
                             continue
-                            
+
                         sender = msg_data.get("sender") or chat.get("identifier")
                         text = msg_data.get("text", "")
-                        
+
                         logger.info(f"New iMessage from {sender}: {text}")
-                        
+
                         # Dispatch
                         await self._handle_message(
                             sender_id=sender,
-                            chat_id=sender, 
+                            chat_id=chat_id,
                             content=text,
                             metadata={"service": chat.get("service")}
                         )
 
                 # Update checkpoint to the latest timestamp seen
                 last_check_ts = max_ts_in_batch
-                
+
             except Exception as e:
                 logger.error(f"Error in poll loop: {e}")
-                
+
             await asyncio.sleep(2)

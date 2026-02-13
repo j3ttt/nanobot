@@ -413,6 +413,8 @@ def agent(
     session_id: str = typer.Option("cli:default", "--session", "-s", help="Session ID"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
     logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during chat"),
+    channel: str = typer.Option(None, "--channel", help="Override default channel (e.g., 'imessage')"),
+    chat_id: str = typer.Option(None, "--chat-id", help="Override default chat ID (e.g., '2' for group chat)"),
 ):
     """Interact with the agent directly."""
     from nanobot.config.loader import load_config
@@ -450,11 +452,23 @@ def agent(
         # Animated spinner is safe to use with prompt_toolkit input handling
         return console.status("[dim]nanobot is thinking...[/dim]", spinner="dots")
 
+    # Determine channel and chat_id to use
+    from nanobot.config.loader import load_config
+    config = load_config()
+    
+    # Use provided values or fall back to config defaults
+    use_channel = channel or os.environ.get("NANOBOT_CHANNEL", "cli")
+    use_chat_id = chat_id or os.environ.get("NANOBOT_CHAT_ID", "direct")
+    
+    # Special handling for iMessage with default chat_id from config
+    if use_channel == "imessage" and use_chat_id == "direct" and config.channels.imsg.default_chat_id:
+        use_chat_id = config.channels.imsg.default_chat_id
+    
     if message:
         # Single message mode
         async def run_once():
             with _thinking_ctx():
-                response = await agent_loop.process_direct(message, session_id)
+                response = await agent_loop.process_direct(message, session_id, use_channel, use_chat_id)
             _print_agent_response(response, render_markdown=markdown)
         
         asyncio.run(run_once())
@@ -462,6 +476,8 @@ def agent(
         # Interactive mode
         _init_prompt_session()
         console.print(f"{__logo__} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit)\n")
+        if use_channel != "cli":
+            console.print(f"[dim]Using channel: {use_channel}, chat_id: {use_chat_id}[/dim]\n")
 
         def _exit_on_sigint(signum, frame):
             _restore_terminal()
@@ -485,7 +501,7 @@ def agent(
                         break
                     
                     with _thinking_ctx():
-                        response = await agent_loop.process_direct(user_input, session_id)
+                        response = await agent_loop.process_direct(user_input, session_id, use_channel, use_chat_id)
                     _print_agent_response(response, render_markdown=markdown)
                 except KeyboardInterrupt:
                     _restore_terminal()

@@ -146,6 +146,7 @@ class ImsgConfig(BaseModel):
     enabled: bool = False
     # No auth needed for local CLI, but maybe allow_from
     allow_from: list[str] = Field(default_factory=list)  # Allowed handles/numbers
+    default_chat_id: str = ""  # Default chat ID for responses (e.g., "2" for group chat)
 
 
 class ChannelsConfig(BaseModel):

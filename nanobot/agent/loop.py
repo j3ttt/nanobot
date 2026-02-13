@@ -443,6 +443,14 @@ Respond with ONLY valid JSON, no markdown fences."""
         Returns:
             The agent's response.
         """
+        # Check if we have a default channel/chat_id configured for iMessage
+        from nanobot.config.loader import load_config
+        config = load_config()
+        
+        # If using iMessage channel and no specific chat_id is provided, use the default from config
+        if channel == "imessage" and chat_id == "direct" and config.channels.imsg.default_chat_id:
+            chat_id = config.channels.imsg.default_chat_id
+        
         msg = InboundMessage(
             channel=channel,
             sender_id="user",
