@@ -39,6 +39,13 @@ class MCPClient:
         self._resources: list[dict[str, Any]] = []
         self._prompts: list[dict[str, Any]] = []
 
+        # CRITICAL-1 FIX: Request/response correlation
+        self._pending_requests: dict[int, asyncio.Future] = {}
+        self._read_task: asyncio.Task | None = None
+
+        # CRITICAL-4 FIX: stderr monitoring
+        self._stderr_task: asyncio.Task | None = None
+
     async def connect(self) -> bool:
         """
         Connect to the MCP server and initialize.
@@ -65,6 +72,12 @@ class MCPClient:
 
             logger.info(f"MCP server '{self.name}' started: {self.command} {' '.join(self.args)}")
 
+            # CRITICAL-1 FIX: Start background read loop
+            self._read_task = asyncio.create_task(self._read_loop())
+
+            # CRITICAL-4 FIX: Start stderr monitor
+            self._stderr_task = asyncio.create_task(self._monitor_stderr())
+
             # Initialize the connection
             init_response = await self._send_request("initialize", {
                 "protocolVersion": "2024-11-05",
@@ -80,6 +93,8 @@ class MCPClient:
 
             if not init_response:
                 logger.error(f"MCP server '{self.name}' initialization failed")
+                # CRITICAL-2 FIX: Clean up on failure
+                await self.disconnect()
                 return False
 
             # Send initialized notification
@@ -95,21 +110,124 @@ class MCPClient:
 
         except Exception as e:
             logger.error(f"Failed to connect to MCP server '{self.name}': {e}")
+            # CRITICAL-2 FIX: Clean up on any exception
+            await self.disconnect()
             return False
 
     async def disconnect(self) -> None:
         """Disconnect from the MCP server."""
+        # CRITICAL-1 FIX: Cancel read loop
+        if self._read_task:
+            self._read_task.cancel()
+            try:
+                await self._read_task
+            except asyncio.CancelledError:
+                pass
+            self._read_task = None
+
+        # CRITICAL-4 FIX: Cancel stderr monitor
+        if self._stderr_task:
+            self._stderr_task.cancel()
+            try:
+                await self._stderr_task
+            except asyncio.CancelledError:
+                pass
+            self._stderr_task = None
+
+        # CRITICAL-1 FIX: Clean up pending requests
+        for future in self._pending_requests.values():
+            if not future.done():
+                future.cancel()
+        self._pending_requests.clear()
+
         if self._process:
             try:
-                self._process.terminate()
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                # Check if already terminated
+                if self._process.returncode is None:
+                    self._process.terminate()
+                    await asyncio.wait_for(self._process.wait(), timeout=5.0)
             except asyncio.TimeoutError:
-                self._process.kill()
+                if self._process.returncode is None:
+                    self._process.kill()
+                    await self._process.wait()
             except Exception as e:
                 logger.warning(f"Error disconnecting from MCP server '{self.name}': {e}")
             finally:
                 self._process = None
                 self._initialized = False
+
+    async def _read_loop(self) -> None:
+        """
+        Background task to read and correlate responses.
+
+        CRITICAL-1 FIX: This ensures responses are correctly matched to requests
+        even when multiple concurrent requests are in flight.
+        """
+        if not self._process or not self._process.stdout:
+            return
+
+        try:
+            while self._process and self._process.stdout:
+                line = await self._process.stdout.readline()
+                if not line:
+                    break
+
+                try:
+                    response = json.loads(line.decode())
+                    msg_id = response.get("id")
+
+                    if msg_id is not None and msg_id in self._pending_requests:
+                        future = self._pending_requests.pop(msg_id)
+                        if not future.done():
+                            if "error" in response:
+                                future.set_exception(
+                                    RuntimeError(f"MCP error: {response['error']}")
+                                )
+                            else:
+                                future.set_result(response.get("result"))
+                    else:
+                        # Server-initiated notification or unmatched response
+                        logger.debug(f"MCP[{self.name}] unmatched message: {response}")
+
+                except json.JSONDecodeError as e:
+                    logger.error(f"MCP[{self.name}] invalid JSON response: {e}")
+                except Exception as e:
+                    logger.error(f"MCP[{self.name}] read loop error processing message: {e}")
+
+        except asyncio.CancelledError:
+            # Normal shutdown
+            pass
+        except Exception as e:
+            logger.error(f"MCP[{self.name}] read loop error: {e}")
+        finally:
+            # Cancel all pending requests on read loop exit
+            for msg_id, future in list(self._pending_requests.items()):
+                if not future.done():
+                    future.set_exception(
+                        RuntimeError(f"MCP server '{self.name}' read loop terminated")
+                    )
+            self._pending_requests.clear()
+
+    async def _monitor_stderr(self) -> None:
+        """
+        Monitor stderr to prevent pipe blocking.
+
+        CRITICAL-4 FIX: Without consuming stderr, the MCP server process can block
+        when the stderr pipe buffer fills up, causing deadlock.
+        """
+        if not self._process or not self._process.stderr:
+            return
+
+        try:
+            async for line in self._process.stderr:
+                decoded = line.decode('utf-8', errors='replace').strip()
+                if decoded:
+                    logger.debug(f"MCP[{self.name}] stderr: {decoded}")
+        except asyncio.CancelledError:
+            # Normal shutdown
+            pass
+        except Exception as e:
+            logger.debug(f"MCP[{self.name}] stderr monitor stopped: {e}")
 
     async def _discover_capabilities(self) -> None:
         """Discover tools, resources, and prompts from the server."""
@@ -196,15 +314,25 @@ class MCPClient:
 
         return response.get("messages", [])
 
-    async def _send_request(self, method: str, params: dict[str, Any]) -> dict[str, Any] | None:
-        """Send a JSON-RPC request and wait for response."""
-        if not self._process or not self._process.stdin or not self._process.stdout:
+    async def _send_request(self, method: str, params: dict[str, Any], timeout: float = 30.0) -> dict[str, Any] | None:
+        """
+        Send a JSON-RPC request and wait for response.
+
+        CRITICAL-1 FIX: Uses Future-based correlation to handle concurrent requests.
+        """
+        if not self._process or not self._process.stdin:
             return None
 
+        msg_id = self._message_id
         self._message_id += 1
+
+        # Create future for this request
+        future: asyncio.Future = asyncio.Future()
+        self._pending_requests[msg_id] = future
+
         request = {
             "jsonrpc": "2.0",
-            "id": self._message_id,
+            "id": msg_id,
             "method": method,
             "params": params
         }
@@ -215,27 +343,16 @@ class MCPClient:
             self._process.stdin.write(request_data.encode())
             await self._process.stdin.drain()
 
-            # Read response
-            response_line = await asyncio.wait_for(
-                self._process.stdout.readline(),
-                timeout=30.0
-            )
-
-            if not response_line:
-                return None
-
-            response = json.loads(response_line.decode())
-
-            if "error" in response:
-                logger.error(f"MCP server '{self.name}' error: {response['error']}")
-                return None
-
-            return response.get("result")
+            # Wait for response (read loop will resolve the future)
+            result = await asyncio.wait_for(future, timeout=timeout)
+            return result
 
         except asyncio.TimeoutError:
+            self._pending_requests.pop(msg_id, None)
             logger.error(f"MCP server '{self.name}' request timeout: {method}")
             return None
         except Exception as e:
+            self._pending_requests.pop(msg_id, None)
             logger.error(f"MCP server '{self.name}' request failed: {e}")
             return None
 
