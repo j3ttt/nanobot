@@ -322,6 +322,23 @@ def gateway(
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
     
+    # Prepare MCP config
+    mcp_config = None
+    if config.mcp.enabled or config.tools.mcp.enabled:
+        # Support both top-level and tools.mcp config
+        mcp_cfg = config.mcp if config.mcp.enabled else config.tools.mcp
+        mcp_config = {
+            "enabled": True,
+            "servers": {
+                name: {
+                    "command": srv.command,
+                    "args": srv.args,
+                    "env": srv.env
+                }
+                for name, srv in mcp_cfg.servers.items()
+            }
+        }
+
     # Create agent with cron service
     agent = AgentLoop(
         bus=bus,
@@ -335,6 +352,7 @@ def gateway(
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
+        mcp_config=mcp_config,
     )
     
     # Set cron callback (needs agent)
@@ -863,5 +881,92 @@ def status():
                 console.print(f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}")
 
 
+# ============================================================================
+# MCP Commands
+# ============================================================================
+
+mcp_app = typer.Typer(help="Manage MCP servers")
+app.add_typer(mcp_app, name="mcp")
+
+
+@mcp_app.command("list")
+def mcp_list():
+    """List configured MCP servers."""
+    from nanobot.config.loader import load_config
+
+    config = load_config()
+
+    # Check both top-level and tools.mcp
+    mcp_config = config.mcp if config.mcp.enabled else config.tools.mcp
+
+    if not mcp_config.enabled:
+        console.print("[yellow]MCP is not enabled[/yellow]")
+        console.print("Enable it in ~/.nanobot/config.json")
+        return
+
+    if not mcp_config.servers:
+        console.print("No MCP servers configured.")
+        return
+
+    table = Table(title="MCP Servers")
+    table.add_column("Name", style="cyan")
+    table.add_column("Command", style="green")
+    table.add_column("Args", style="yellow")
+
+    for name, server in mcp_config.servers.items():
+        args_str = " ".join(server.args) if server.args else "(none)"
+        table.add_row(name, server.command, args_str)
+
+    console.print(table)
+
+
+@mcp_app.command("test")
+def mcp_test(
+    server: str = typer.Argument(..., help="Server name to test"),
+):
+    """Test connection to an MCP server."""
+    import asyncio
+    from nanobot.config.loader import load_config
+    from nanobot.mcp.client import MCPClient
+
+    config = load_config()
+    mcp_config = config.mcp if config.mcp.enabled else config.tools.mcp
+
+    if not mcp_config.enabled:
+        console.print("[red]MCP is not enabled[/red]")
+        raise typer.Exit(1)
+
+    if server not in mcp_config.servers:
+        console.print(f"[red]Server '{server}' not found in config[/red]")
+        raise typer.Exit(1)
+
+    srv = mcp_config.servers[server]
+
+    async def test():
+        console.print(f"Testing connection to '{server}'...")
+        client = MCPClient(server, srv.command, srv.args, srv.env)
+
+        if not await client.connect():
+            console.print(f"[red]✗[/red] Failed to connect")
+            raise typer.Exit(1)
+
+        console.print(f"[green]✓[/green] Connected successfully")
+        console.print(f"  Tools: {len(client.tools)}")
+        console.print(f"  Resources: {len(client.resources)}")
+        console.print(f"  Prompts: {len(client.prompts)}")
+
+        if client.tools:
+            console.print("\n[cyan]Available tools:[/cyan]")
+            for tool in client.tools[:5]:  # Show first 5
+                name = tool.get("name", "")
+                desc = tool.get("description", "")
+                console.print(f"  • {name}: {desc[:60]}...")
+
+        await client.disconnect()
+
+    asyncio.run(test())
+
+
 if __name__ == "__main__":
     app()
+

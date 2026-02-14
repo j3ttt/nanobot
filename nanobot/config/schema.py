@@ -223,10 +223,24 @@ class ExecToolConfig(BaseModel):
     timeout: int = 60
 
 
+class MCPServerConfig(BaseModel):
+    """MCP server configuration."""
+    command: str = ""  # Command to start the MCP server
+    args: list[str] = Field(default_factory=list)  # Command arguments
+    env: dict[str, str] = Field(default_factory=dict)  # Environment variables
+
+
+class MCPConfig(BaseModel):
+    """MCP (Model Context Protocol) configuration."""
+    enabled: bool = False
+    servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
 
 
@@ -237,6 +251,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)  # Top-level MCP config for convenience
     
     @property
     def workspace_path(self) -> Path:

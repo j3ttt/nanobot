@@ -1,0 +1,60 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.nanobot/workspace",
+      "model": "anthropic/claude-opus-4-5",
+      "max_tokens": 8192,
+      "temperature": 0.7,
+      "max_tool_iterations": 20,
+      "memory_window": 50
+    }
+  },
+  "providers": {
+    "openrouter": {
+      "apiKey": "sk-or-v1-xxxxx"
+    }
+  },
+  "mcp": {
+    "enabled": true,
+    "servers": {
+      "filesystem": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem",
+          "/Users/you/Documents"
+        ],
+        "env": {}
+      },
+      "github": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-github"
+        ],
+        "env": {
+          "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxxxx"
+        }
+      }
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": false,
+      "token": "",
+      "allowFrom": []
+    }
+  },
+  "tools": {
+    "web": {
+      "search": {
+        "apiKey": "",
+        "maxResults": 5
+      }
+    },
+    "exec": {
+      "timeout": 60
+    },
+    "restrictToWorkspace": false
+  }
+}

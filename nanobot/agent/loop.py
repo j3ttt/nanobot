@@ -48,6 +48,7 @@ class AgentLoop:
         cron_service: "CronService | None" = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
+        mcp_config: dict | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -61,7 +62,8 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
-        
+        self.mcp_config = mcp_config
+
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
@@ -74,7 +76,10 @@ class AgentLoop:
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
         )
-        
+
+        # MCP Manager for Model Context Protocol servers
+        self.mcp_manager = None
+
         self._running = False
         self._register_default_tools()
     
@@ -114,7 +119,11 @@ class AgentLoop:
         """Run the agent loop, processing messages from the bus."""
         self._running = True
         logger.info("Agent loop started")
-        
+
+        # Initialize MCP servers if configured
+        if self.mcp_config and self.mcp_config.get("enabled"):
+            await self._initialize_mcp()
+
         while self._running:
             try:
                 # Wait for next message
@@ -143,6 +152,27 @@ class AgentLoop:
         """Stop the agent loop."""
         self._running = False
         logger.info("Agent loop stopping")
+
+    async def _initialize_mcp(self) -> None:
+        """Initialize MCP servers from configuration."""
+        try:
+            from nanobot.mcp.manager import MCPManager
+
+            self.mcp_manager = MCPManager(self.tools)
+            await self.mcp_manager.initialize_from_config(self.mcp_config)
+
+            if self.mcp_manager.server_count > 0:
+                logger.info(f"MCP initialized: {self.mcp_manager.server_count} servers connected")
+            else:
+                logger.warning("MCP enabled but no servers connected")
+        except Exception as e:
+            logger.error(f"Failed to initialize MCP: {e}")
+
+    async def shutdown_mcp(self) -> None:
+        """Shutdown MCP servers."""
+        if self.mcp_manager:
+            await self.mcp_manager.shutdown()
+            logger.info("MCP servers shutdown")
     
     async def _process_message(self, msg: InboundMessage, session_key: str | None = None) -> OutboundMessage | None:
         """
