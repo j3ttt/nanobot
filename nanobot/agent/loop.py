@@ -407,9 +407,15 @@ class AgentLoop:
 
     async def _consolidate_memory(self, session) -> None:
         """Consolidate old messages into MEMORY.md + HISTORY.md, then trim session."""
+        if not session.messages:
+            return
         memory = MemoryStore(self.workspace)
-        keep_count = min(10, max(2, self.memory_window // 2))
-        old_messages = session.messages[:-keep_count]  # Everything except recent ones
+        if archive_all:
+            old_messages = session.messages
+            keep_count = 0
+        else:
+            keep_count = min(10, max(2, self.memory_window // 2))
+            old_messages = session.messages[:-keep_count]
         if not old_messages:
             return
         logger.info(
@@ -456,10 +462,9 @@ Respond with ONLY valid JSON, no markdown fences."""
             import json as _json
 
             text = (response.content or "").strip()
-            # Strip markdown fences that LLMs often add despite instructions
             if text.startswith("```"):
                 text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            result = _json.loads(text)
+            result = json.loads(text)
 
             if entry := result.get("history_entry"):
                 memory.append_history(entry)
@@ -467,8 +472,7 @@ Respond with ONLY valid JSON, no markdown fences."""
                 if update != current_memory:
                     memory.write_long_term(update)
 
-            # Trim session to recent messages
-            session.messages = session.messages[-keep_count:]
+            session.messages = session.messages[-keep_count:] if keep_count else []
             self.sessions.save(session)
             logger.info(
                 f"Memory consolidation done, session trimmed to {len(session.messages)} messages"

@@ -675,7 +675,7 @@ def channels_login():
     console.print("Scan the QR code to connect.\n")
 
     try:
-        subprocess.run(["npm", "start"], cwd=bridge_dir, check=True)
+        subprocess.run(["npm", "start"], cwd=bridge_dir, check=True, env=env)
     except subprocess.CalledProcessError as e:
         console.print(f"[red]Bridge failed: {e}[/red]")
     except FileNotFoundError:
