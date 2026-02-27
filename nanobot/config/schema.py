@@ -142,12 +142,21 @@ class QQConfig(BaseModel):
     allow_from: list[str] = Field(default_factory=list)  # Allowed user openids (empty = public access)
 
 
+class ImsgConfig(BaseModel):
+    """iMessage channel configuration."""
+    enabled: bool = False
+    # No auth needed for local CLI, but maybe allow_from
+    allow_from: list[str] = Field(default_factory=list)  # Allowed handles/numbers
+    default_chat_id: str = ""  # Default chat ID for responses (e.g., "2" for group chat)
+
+
 class ChannelsConfig(BaseModel):
     """Configuration for chat channels."""
     whatsapp: WhatsAppConfig = Field(default_factory=WhatsAppConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
+    imsg: ImsgConfig = Field(default_factory=ImsgConfig)
     mochat: MochatConfig = Field(default_factory=MochatConfig)
     dingtalk: DingTalkConfig = Field(default_factory=DingTalkConfig)
     email: EmailConfig = Field(default_factory=EmailConfig)
@@ -215,10 +224,24 @@ class ExecToolConfig(BaseModel):
     timeout: int = 60
 
 
+class MCPServerConfig(BaseModel):
+    """MCP server configuration."""
+    command: str = ""  # Command to start the MCP server
+    args: list[str] = Field(default_factory=list)  # Command arguments
+    env: dict[str, str] = Field(default_factory=dict)  # Environment variables
+
+
+class MCPConfig(BaseModel):
+    """MCP (Model Context Protocol) configuration."""
+    enabled: bool = False
+    servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
 
 
@@ -229,6 +252,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)  # Top-level MCP config for convenience
     
     @property
     def workspace_path(self) -> Path:
