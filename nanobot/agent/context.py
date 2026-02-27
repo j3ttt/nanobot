@@ -163,21 +163,32 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
         """Build user message content with optional base64-encoded images."""
+        print(f"[DEBUG _build_user_content] media={media}")
         if not media:
             return text
         
         images = []
         for path in media:
+            if path.startswith("data:image/") and ";base64," in path:
+                images.append({"type": "image_url", "image_url": {"url": path}})
+                print(f"[DEBUG _build_user_content] Using inline image data URL, size={len(path)} chars")
+                continue
             p = Path(path)
             mime, _ = mimetypes.guess_type(path)
             if not p.is_file() or not mime or not mime.startswith("image/"):
+                print(f"[DEBUG _build_user_content] Skipping invalid media: {path}, mime={mime}, exists={p.is_file()}")
                 continue
             b64 = base64.b64encode(p.read_bytes()).decode()
             images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+            print(f"[DEBUG _build_user_content] Encoded image: {path}, mime={mime}, size={len(b64)} chars")
         
         if not images:
+            print(f"[DEBUG _build_user_content] No valid images, returning text only")
             return text
-        return images + [{"type": "text", "text": text}]
+        
+        result = images + [{"type": "text", "text": text}]
+        print(f"[DEBUG _build_user_content] Returning {len(images)} image(s) + text, type={type(result).__name__}")
+        return result
     
     def add_tool_result(
         self,

@@ -1,6 +1,7 @@
 """DingTalk/DingDing channel implementation using Stream Mode."""
 
 import asyncio
+import base64
 import json
 import time
 from typing import Any
@@ -48,6 +49,11 @@ class NanobotDingTalkHandler(CallbackHandler):
         try:
             # Parse using SDK's ChatbotMessage for robust handling
             chatbot_msg = ChatbotMessage.from_dict(message.data)
+            logger.debug(
+                "DingTalk raw inbound message: msgtype={}, msgId={}",
+                message.data.get("msgtype"),
+                message.data.get("msgId"),
+            )
 
             # Extract text content; fall back to raw dict if SDK object is empty
             content = ""
@@ -56,9 +62,21 @@ class NanobotDingTalkHandler(CallbackHandler):
             if not content:
                 content = message.data.get("text", {}).get("content", "").strip()
 
+            image_paths = await self.channel._download_incoming_images(chatbot_msg, message.data)
+            if image_paths:
+                logger.debug(
+                    "Prepared {} DingTalk image(s) for msgId={}",
+                    len(image_paths),
+                    chatbot_msg.message_id,
+                )
+                if content:
+                    content = f"{content}\n" + "\n".join("[image]" for _ in image_paths)
+                else:
+                    content = "\n".join("[image]" for _ in image_paths)
+
             if not content:
                 logger.warning(
-                    f"Received empty or unsupported message type: {chatbot_msg.message_type}"
+                    f"Received empty or unsupported DingTalk message type: {chatbot_msg.message_type}"
                 )
                 return AckMessage.STATUS_OK, "OK"
 
@@ -73,7 +91,13 @@ class NanobotDingTalkHandler(CallbackHandler):
             # Store reference to prevent GC before task completes.
             task = asyncio.create_task(
                 self.channel._on_message(
-                    content, sender_id, sender_name, conversation_id, conversation_type
+                    content,
+                    sender_id,
+                    sender_name,
+                    conversation_id,
+                    conversation_type,
+                    media=image_paths,
+                    message_type=chatbot_msg.message_type,
                 )
             )
             self.channel._background_tasks.add(task)
@@ -245,6 +269,139 @@ class DingTalkChannel(BaseChannel):
         except Exception as e:
             logger.error(f"Error sending DingTalk message: {e}")
 
+    def _extract_image_download_codes(
+        self, chatbot_msg: Any, raw_data: dict[str, Any]
+    ) -> list[str]:
+        """Extract image downloadCode from SDK object and raw message."""
+        codes: list[str] = []
+
+        msgtype = getattr(chatbot_msg, "message_type", None) or raw_data.get("msgtype")
+        image_content = getattr(chatbot_msg, "image_content", None)
+        if msgtype == "picture" and image_content and getattr(image_content, "download_code", None):
+            codes.append(image_content.download_code)
+
+        rich_text_content = getattr(chatbot_msg, "rich_text_content", None)
+        if msgtype == "richText" and rich_text_content and rich_text_content.rich_text_list:
+            for item in rich_text_content.rich_text_list:
+                code = item.get("downloadCode")
+                if code:
+                    codes.append(code)
+
+        # Backward-compatible raw dict fallback; do not rely on SDK helper methods.
+        raw_content = raw_data.get("content", {})
+        if isinstance(raw_content, dict):
+            raw_code = raw_content.get("downloadCode")
+            if raw_code:
+                codes.append(raw_code)
+
+            for item in raw_content.get("richText", []) or []:
+                if isinstance(item, dict) and item.get("downloadCode"):
+                    codes.append(item["downloadCode"])
+
+        deduped = list(dict.fromkeys(codes))
+        logger.debug(
+            "Extracted {} DingTalk image downloadCode(s) for msgId={}: {}",
+            len(deduped),
+            raw_data.get("msgId"),
+            deduped,
+        )
+        return deduped
+
+    async def _get_image_download_url(self, download_code: str) -> str | None:
+        """Fetch temporary download URL for DingTalk image by downloadCode."""
+        token = await self._get_access_token()
+        if not token:
+            logger.warning("Cannot get DingTalk image download URL: missing access token")
+            return None
+        if not self._http:
+            logger.warning("Cannot get DingTalk image download URL: HTTP client not initialized")
+            return None
+
+        url = "https://api.dingtalk.com/v1.0/robot/messageFiles/download"
+        headers = {"x-acs-dingtalk-access-token": token}
+        data = {"robotCode": self.config.client_id, "downloadCode": download_code}
+
+        try:
+            resp = await self._http.post(url, json=data, headers=headers)
+            resp.raise_for_status()
+            download_url = resp.json().get("downloadUrl")
+            if not download_url:
+                logger.warning("DingTalk messageFiles/download response has no downloadUrl")
+                return None
+            logger.debug("Resolved DingTalk downloadCode={} to URL", download_code)
+            return download_url
+        except Exception as e:
+            logger.warning(
+                "Failed to resolve DingTalk image downloadCode={}: {}",
+                download_code,
+                e,
+            )
+            return None
+
+    def _guess_image_mime(self, content: bytes) -> str | None:
+        """Guess image MIME type from magic bytes."""
+        if content.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if content.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if content.startswith((b"GIF87a", b"GIF89a")):
+            return "image/gif"
+        if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+            return "image/webp"
+        return None
+
+    async def _download_image_data_url(self, download_url: str, download_code: str) -> str | None:
+        """Download DingTalk image and return it as data URL for multimodal LLM input."""
+        if not self._http:
+            logger.warning("Cannot download DingTalk image: HTTP client not initialized")
+            return None
+
+        try:
+            resp = await self._http.get(download_url)
+            resp.raise_for_status()
+            content = resp.content
+            mime = (resp.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+            if not mime.startswith("image/"):
+                mime = self._guess_image_mime(content) or ""
+            if not mime.startswith("image/"):
+                logger.warning(
+                    "Skip DingTalk image {}: unsupported content-type '{}'",
+                    download_code,
+                    resp.headers.get("content-type"),
+                )
+                return None
+
+            b64 = base64.b64encode(content).decode("ascii")
+            data_url = f"data:{mime};base64,{b64}"
+            logger.debug(
+                "Converted DingTalk image downloadCode={} to data URL ({} bytes, mime={})",
+                download_code,
+                len(content),
+                mime,
+            )
+            return data_url
+        except Exception as e:
+            logger.warning("Failed to download DingTalk image {}: {}", download_code, e)
+            return None
+
+    async def _download_incoming_images(
+        self, chatbot_msg: Any, raw_data: dict[str, Any]
+    ) -> list[str]:
+        """Download all images from an incoming DingTalk message."""
+        download_codes = self._extract_image_download_codes(chatbot_msg, raw_data)
+        if not download_codes:
+            return []
+
+        media_paths: list[str] = []
+        for download_code in download_codes:
+            download_url = await self._get_image_download_url(download_code)
+            if not download_url:
+                continue
+            image_data_url = await self._download_image_data_url(download_url, download_code)
+            if image_data_url:
+                media_paths.append(image_data_url)
+        return media_paths
+
     async def _on_message(
         self,
         content: str,
@@ -252,6 +409,8 @@ class DingTalkChannel(BaseChannel):
         sender_name: str,
         conversation_id: str,
         conversation_type: str,
+        media: list[str] | None = None,
+        message_type: str | None = None,
     ) -> None:
         """Handle incoming message (called by NanobotDingTalkHandler).
 
@@ -267,11 +426,13 @@ class DingTalkChannel(BaseChannel):
                 sender_id=conversation_id if is_group else sender_id,
                 chat_id=conversation_id if is_group else sender_id,
                 content=str(content),
+                media=media or [],
                 metadata={
                     "sender_name": sender_name,
                     "platform": "dingtalk",
                     "is_group": is_group,
                     "conversation_id": conversation_id,
+                    "message_type": message_type,
                 },
             )
         except Exception as e:
