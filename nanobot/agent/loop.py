@@ -26,7 +26,7 @@ from nanobot.session.manager import SessionManager
 class AgentLoop:
     """
     The agent loop is the core processing engine.
-    
+
     It:
     1. Receives messages from the bus
     2. Builds context with history, memory, skills
@@ -34,7 +34,7 @@ class AgentLoop:
     4. Executes tool calls
     5. Sends responses back
     """
-    
+
     def __init__(
         self,
         bus: MessageBus,
@@ -49,9 +49,11 @@ class AgentLoop:
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
         mcp_config: dict | None = None,
+        config: Any = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
+
         self.bus = bus
         self.provider = provider
         self.workspace = workspace
@@ -63,6 +65,7 @@ class AgentLoop:
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self.mcp_config = mcp_config
+        self.config = config
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -82,7 +85,7 @@ class AgentLoop:
 
         self._running = False
         self._register_default_tools()
-    
+
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
         # File tools (restrict to workspace if configured)
@@ -91,30 +94,32 @@ class AgentLoop:
         self.tools.register(WriteFileTool(allowed_dir=allowed_dir))
         self.tools.register(EditFileTool(allowed_dir=allowed_dir))
         self.tools.register(ListDirTool(allowed_dir=allowed_dir))
-        
+
         # Shell tool
-        self.tools.register(ExecTool(
-            working_dir=str(self.workspace),
-            timeout=self.exec_config.timeout,
-            restrict_to_workspace=self.restrict_to_workspace,
-        ))
-        
+        self.tools.register(
+            ExecTool(
+                working_dir=str(self.workspace),
+                timeout=self.exec_config.timeout,
+                restrict_to_workspace=self.restrict_to_workspace,
+            )
+        )
+
         # Web tools
         self.tools.register(WebSearchTool(api_key=self.brave_api_key))
         self.tools.register(WebFetchTool())
-        
+
         # Message tool
         message_tool = MessageTool(send_callback=self.bus.publish_outbound)
         self.tools.register(message_tool)
-        
+
         # Spawn tool (for subagents)
         spawn_tool = SpawnTool(manager=self.subagents)
         self.tools.register(spawn_tool)
-        
+
         # Cron tool (for scheduling)
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
-    
+
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
         self._running = True
@@ -127,11 +132,8 @@ class AgentLoop:
         while self._running:
             try:
                 # Wait for next message
-                msg = await asyncio.wait_for(
-                    self.bus.consume_inbound(),
-                    timeout=1.0
-                )
-                
+                msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
+
                 # Process it
                 try:
                     response = await self._process_message(msg)
@@ -140,14 +142,16 @@ class AgentLoop:
                 except Exception as e:
                     logger.error(f"Error processing message: {e}")
                     # Send error response
-                    await self.bus.publish_outbound(OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=f"Sorry, I encountered an error: {str(e)}"
-                    ))
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                            content=f"Sorry, I encountered an error: {str(e)}",
+                        )
+                    )
             except asyncio.TimeoutError:
                 continue
-    
+
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
@@ -173,15 +177,17 @@ class AgentLoop:
         if self.mcp_manager:
             await self.mcp_manager.shutdown()
             logger.info("MCP servers shutdown")
-    
-    async def _process_message(self, msg: InboundMessage, session_key: str | None = None) -> OutboundMessage | None:
+
+    async def _process_message(
+        self, msg: InboundMessage, session_key: str | None = None
+    ) -> OutboundMessage | None:
         """
         Process a single inbound message.
-        
+
         Args:
             msg: The inbound message to process.
             session_key: Override session key (used by process_direct).
-        
+
         Returns:
             The response message, or None if no response needed.
         """
@@ -189,30 +195,35 @@ class AgentLoop:
         # The chat_id contains the original "channel:chat_id" to route back to
         if msg.channel == "system":
             return await self._process_system_message(msg)
-        
+
+        # Handle commands (messages starting with /)
+        content_stripped = msg.content.strip()
+        if content_stripped.startswith("/"):
+            return await self._handle_command(msg, content_stripped)
+
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
-        
+
         # Get or create session
         session = self.sessions.get_or_create(session_key or msg.session_key)
-        
+
         # Consolidate memory before processing if session is too large
         if len(session.messages) > self.memory_window:
             await self._consolidate_memory(session)
-        
+
         # Update tool contexts
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(msg.channel, msg.chat_id)
-        
+
         spawn_tool = self.tools.get("spawn")
         if isinstance(spawn_tool, SpawnTool):
             spawn_tool.set_context(msg.channel, msg.chat_id)
-        
+
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(msg.channel, msg.chat_id)
-        
+
         # Build initial messages (use get_history for LLM-formatted messages)
         messages = self.context.build_messages(
             history=session.get_history(),
@@ -221,22 +232,20 @@ class AgentLoop:
             channel=msg.channel,
             chat_id=msg.chat_id,
         )
-        
+
         # Agent loop
         iteration = 0
         final_content = None
         tools_used: list[str] = []
-        
+
         while iteration < self.max_iterations:
             iteration += 1
-            
+
             # Call LLM
             response = await self.provider.chat(
-                messages=messages,
-                tools=self.tools.get_definitions(),
-                model=self.model
+                messages=messages, tools=self.tools.get_definitions(), model=self.model
             )
-            
+
             # Handle tool calls
             if response.has_tool_calls:
                 # Add assistant message with tool calls
@@ -246,16 +255,18 @@ class AgentLoop:
                         "type": "function",
                         "function": {
                             "name": tc.name,
-                            "arguments": json.dumps(tc.arguments)  # Must be JSON string
-                        }
+                            "arguments": json.dumps(tc.arguments),  # Must be JSON string
+                        },
                     }
                     for tc in response.tool_calls
                 ]
                 messages = self.context.add_assistant_message(
-                    messages, response.content, tool_call_dicts,
+                    messages,
+                    response.content,
+                    tool_call_dicts,
                     reasoning_content=response.reasoning_content,
                 )
-                
+
                 # Execute tools
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
@@ -266,41 +277,45 @@ class AgentLoop:
                         messages, tool_call.id, tool_call.name, result
                     )
                 # Interleaved CoT: reflect before next action
-                messages.append({"role": "user", "content": "Reflect on the results and decide next steps."})
+                messages.append(
+                    {"role": "user", "content": "Reflect on the results and decide next steps."}
+                )
             else:
                 # No tool calls, we're done
                 final_content = response.content
                 break
-        
+
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
-        
+
         # Log response preview
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
-        
+
         # Save to session (include tool names so consolidation sees what happened)
         session.add_message("user", msg.content)
-        session.add_message("assistant", final_content,
-                            tools_used=tools_used if tools_used else None)
+        session.add_message(
+            "assistant", final_content, tools_used=tools_used if tools_used else None
+        )
         self.sessions.save(session)
-        
+
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=final_content,
-            metadata=msg.metadata or {},  # Pass through for channel-specific needs (e.g. Slack thread_ts)
+            metadata=msg.metadata
+            or {},  # Pass through for channel-specific needs (e.g. Slack thread_ts)
         )
-    
+
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
         Process a system message (e.g., subagent announce).
-        
+
         The chat_id field contains "original_channel:original_chat_id" to route
         the response back to the correct destination.
         """
         logger.info(f"Processing system message from {msg.sender_id}")
-        
+
         # Parse origin from chat_id (format: "channel:chat_id")
         if ":" in msg.chat_id:
             parts = msg.chat_id.split(":", 1)
@@ -310,24 +325,24 @@ class AgentLoop:
             # Fallback
             origin_channel = "cli"
             origin_chat_id = msg.chat_id
-        
+
         # Use the origin session for context
         session_key = f"{origin_channel}:{origin_chat_id}"
         session = self.sessions.get_or_create(session_key)
-        
+
         # Update tool contexts
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(origin_channel, origin_chat_id)
-        
+
         spawn_tool = self.tools.get("spawn")
         if isinstance(spawn_tool, SpawnTool):
             spawn_tool.set_context(origin_channel, origin_chat_id)
-        
+
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(origin_channel, origin_chat_id)
-        
+
         # Build messages with the announce content
         messages = self.context.build_messages(
             history=session.get_history(),
@@ -335,37 +350,34 @@ class AgentLoop:
             channel=origin_channel,
             chat_id=origin_chat_id,
         )
-        
+
         # Agent loop (limited for announce handling)
         iteration = 0
         final_content = None
-        
+
         while iteration < self.max_iterations:
             iteration += 1
-            
+
             response = await self.provider.chat(
-                messages=messages,
-                tools=self.tools.get_definitions(),
-                model=self.model
+                messages=messages, tools=self.tools.get_definitions(), model=self.model
             )
-            
+
             if response.has_tool_calls:
                 tool_call_dicts = [
                     {
                         "id": tc.id,
                         "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments)
-                        }
+                        "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
                     }
                     for tc in response.tool_calls
                 ]
                 messages = self.context.add_assistant_message(
-                    messages, response.content, tool_call_dicts,
+                    messages,
+                    response.content,
+                    tool_call_dicts,
                     reasoning_content=response.reasoning_content,
                 )
-                
+
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
@@ -374,25 +386,25 @@ class AgentLoop:
                         messages, tool_call.id, tool_call.name, result
                     )
                 # Interleaved CoT: reflect before next action
-                messages.append({"role": "user", "content": "Reflect on the results and decide next steps."})
+                messages.append(
+                    {"role": "user", "content": "Reflect on the results and decide next steps."}
+                )
             else:
                 final_content = response.content
                 break
-        
+
         if final_content is None:
             final_content = "Background task completed."
-        
+
         # Save to session (mark as system message in history)
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
         session.add_message("assistant", final_content)
         self.sessions.save(session)
-        
+
         return OutboundMessage(
-            channel=origin_channel,
-            chat_id=origin_chat_id,
-            content=final_content
+            channel=origin_channel, chat_id=origin_chat_id, content=final_content
         )
-    
+
     async def _consolidate_memory(self, session) -> None:
         """Consolidate old messages into MEMORY.md + HISTORY.md, then trim session."""
         memory = MemoryStore(self.workspace)
@@ -400,7 +412,9 @@ class AgentLoop:
         old_messages = session.messages[:-keep_count]  # Everything except recent ones
         if not old_messages:
             return
-        logger.info(f"Memory consolidation started: {len(session.messages)} messages, archiving {len(old_messages)}, keeping {keep_count}")
+        logger.info(
+            f"Memory consolidation started: {len(session.messages)} messages, archiving {len(old_messages)}, keeping {keep_count}"
+        )
 
         # Format messages for LLM (include tool names when available)
         lines = []
@@ -408,7 +422,9 @@ class AgentLoop:
             if not m.get("content"):
                 continue
             tools = f" [tools: {', '.join(m['tools_used'])}]" if m.get("tools_used") else ""
-            lines.append(f"[{m.get('timestamp', '?')[:16]}] {m['role'].upper()}{tools}: {m['content']}")
+            lines.append(
+                f"[{m.get('timestamp', '?')[:16]}] {m['role'].upper()}{tools}: {m['content']}"
+            )
         conversation = "\n".join(lines)
         current_memory = memory.read_long_term()
 
@@ -429,12 +445,16 @@ Respond with ONLY valid JSON, no markdown fences."""
         try:
             response = await self.provider.chat(
                 messages=[
-                    {"role": "system", "content": "You are a memory consolidation agent. Respond only with valid JSON."},
+                    {
+                        "role": "system",
+                        "content": "You are a memory consolidation agent. Respond only with valid JSON.",
+                    },
                     {"role": "user", "content": prompt},
                 ],
                 model=self.model,
             )
             import json as _json
+
             text = (response.content or "").strip()
             # Strip markdown fences that LLMs often add despite instructions
             if text.startswith("```"):
@@ -450,7 +470,9 @@ Respond with ONLY valid JSON, no markdown fences."""
             # Trim session to recent messages
             session.messages = session.messages[-keep_count:]
             self.sessions.save(session)
-            logger.info(f"Memory consolidation done, session trimmed to {len(session.messages)} messages")
+            logger.info(
+                f"Memory consolidation done, session trimmed to {len(session.messages)} messages"
+            )
         except Exception as e:
             logger.error(f"Memory consolidation failed: {e}")
 
@@ -463,30 +485,125 @@ Respond with ONLY valid JSON, no markdown fences."""
     ) -> str:
         """
         Process a message directly (for CLI or cron usage).
-        
+
         Args:
             content: The message content.
             session_key: Session identifier (overrides channel:chat_id for session lookup).
             channel: Source channel (for tool context routing).
             chat_id: Source chat ID (for tool context routing).
-        
+
         Returns:
             The agent's response.
         """
         # Check if we have a default channel/chat_id configured for iMessage
         from nanobot.config.loader import load_config
+
         config = load_config()
-        
+
         # If using iMessage channel and no specific chat_id is provided, use the default from config
         if channel == "imessage" and chat_id == "direct" and config.channels.imsg.default_chat_id:
             chat_id = config.channels.imsg.default_chat_id
-        
-        msg = InboundMessage(
-            channel=channel,
-            sender_id="user",
-            chat_id=chat_id,
-            content=content
-        )
-        
+
+        msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
+
         response = await self._process_message(msg, session_key=session_key)
         return response.content if response else ""
+
+    async def _handle_command(self, msg: InboundMessage, content: str) -> OutboundMessage | None:
+        """Handle slash commands."""
+        parts = content.split()
+        cmd = parts[0].lower() if parts else ""
+        args = parts[1:] if len(parts) > 1 else []
+
+        if cmd == "/model":
+            return await self._cmd_model(msg, args)
+        elif cmd == "/models":
+            return await self._cmd_models(msg, args)
+        elif cmd == "/help":
+            return await self._cmd_help(msg, args)
+        else:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"Unknown command: {cmd}\nType /help for available commands.",
+            )
+
+    async def _cmd_model(self, msg: InboundMessage, args: list[str]) -> OutboundMessage:
+        """Handle /model command: show or switch current model."""
+        if not args:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"Current model: `{self.model}`",
+            )
+
+        new_model = args[0]
+
+        if self.config:
+            from nanobot.providers.litellm_provider import LiteLLMProvider
+
+            provider_config = self.config.get_provider(new_model)
+            if provider_config and provider_config.api_key:
+                self.provider = LiteLLMProvider(
+                    api_key=provider_config.api_key,
+                    api_base=self.config.get_api_base(new_model),
+                    default_model=new_model,
+                    extra_headers=provider_config.extra_headers,
+                    provider_name=self.config.get_provider_name(new_model),
+                )
+                self.model = new_model
+                self.subagents.model = new_model
+                logger.info(f"Switched to model: {new_model}")
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"✅ Model switched to: `{new_model}`",
+                )
+
+        self.model = new_model
+        self.subagents.model = new_model
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=f"✅ Model switched to: `{new_model}`",
+        )
+
+    async def _cmd_models(self, msg: InboundMessage, args: list[str]) -> OutboundMessage:
+        """Handle /models command: list configured providers."""
+        if not self.config:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="Model list not available (no config loaded).",
+            )
+
+        from nanobot.providers.registry import PROVIDERS
+
+        lines = ["📋 **Configured Providers:**\n"]
+        for spec in PROVIDERS:
+            provider_config = getattr(self.config.providers, spec.name, None)
+            if provider_config and provider_config.api_key:
+                lines.append(f"✅ **{spec.display_name}** (`{spec.name}`)")
+
+        lines.append(f"\n**Current model:** `{self.model}`")
+        lines.append("\nUse `/model <name>` to switch.")
+
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content="\n".join(lines),
+        )
+
+    async def _cmd_help(self, msg: InboundMessage, args: list[str]) -> OutboundMessage:
+        """Handle /help command."""
+        help_text = """📖 **Available Commands:**
+
+`/model [name]` - Show or switch current model
+`/models` - List configured providers
+`/help` - Show this help message
+"""
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=help_text,
+        )
