@@ -526,6 +526,7 @@ Respond with ONLY valid JSON, no markdown fences."""
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 content=f"Unknown command: {cmd}\nType /help for available commands.",
+                metadata=msg.metadata,
             )
 
     async def _cmd_model(self, msg: InboundMessage, args: list[str]) -> OutboundMessage:
@@ -535,6 +536,7 @@ Respond with ONLY valid JSON, no markdown fences."""
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 content=f"Current model: `{self.model}`",
+                metadata=msg.metadata,
             )
 
         new_model = args[0]
@@ -558,6 +560,7 @@ Respond with ONLY valid JSON, no markdown fences."""
                     channel=msg.channel,
                     chat_id=msg.chat_id,
                     content=f"✅ Model switched to: `{new_model}`",
+                    metadata=msg.metadata,
                 )
 
         self.model = new_model
@@ -566,6 +569,7 @@ Respond with ONLY valid JSON, no markdown fences."""
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=f"✅ Model switched to: `{new_model}`",
+            metadata=msg.metadata,
         )
 
     async def _cmd_models(self, msg: InboundMessage, args: list[str]) -> OutboundMessage:
@@ -575,6 +579,7 @@ Respond with ONLY valid JSON, no markdown fences."""
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 content="Model list not available (no config loaded).",
+                metadata=msg.metadata,
             )
 
         from nanobot.providers.registry import PROVIDERS
@@ -592,6 +597,7 @@ Respond with ONLY valid JSON, no markdown fences."""
             channel=msg.channel,
             chat_id=msg.chat_id,
             content="\n".join(lines),
+            metadata=msg.metadata,
         )
 
     async def _cmd_help(self, msg: InboundMessage, args: list[str]) -> OutboundMessage:
@@ -606,4 +612,5 @@ Respond with ONLY valid JSON, no markdown fences."""
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=help_text,
+            metadata=msg.metadata,
         )
