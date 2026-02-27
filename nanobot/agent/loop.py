@@ -405,7 +405,7 @@ class AgentLoop:
             channel=origin_channel, chat_id=origin_chat_id, content=final_content
         )
 
-    async def _consolidate_memory(self, session) -> None:
+    async def _consolidate_memory(self, session, archive_all: bool = False) -> None:
         """Consolidate old messages into MEMORY.md + HISTORY.md, then trim session."""
         if not session.messages:
             return
