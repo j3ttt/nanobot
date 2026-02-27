@@ -218,7 +218,7 @@ class AgentLoop:
 
         spawn_tool = self.tools.get("spawn")
         if isinstance(spawn_tool, SpawnTool):
-            spawn_tool.set_context(msg.channel, msg.chat_id)
+            spawn_tool.set_context(msg.channel, msg.chat_id, msg.metadata)
 
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
@@ -337,7 +337,7 @@ class AgentLoop:
 
         spawn_tool = self.tools.get("spawn")
         if isinstance(spawn_tool, SpawnTool):
-            spawn_tool.set_context(origin_channel, origin_chat_id)
+            spawn_tool.set_context(origin_channel, origin_chat_id, msg.metadata)
 
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
@@ -402,7 +402,10 @@ class AgentLoop:
         self.sessions.save(session)
 
         return OutboundMessage(
-            channel=origin_channel, chat_id=origin_chat_id, content=final_content
+            channel=origin_channel,
+            chat_id=origin_chat_id,
+            content=final_content,
+            metadata=msg.metadata,
         )
 
     async def _consolidate_memory(self, session, archive_all: bool = False) -> None:
