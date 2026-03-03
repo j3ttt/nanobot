@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
+
+import httpx
 from loguru import logger
 from telegram import BotCommand, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -106,6 +109,7 @@ class TelegramChannel(BaseChannel):
         self._app: Application | None = None
         self._chat_ids: dict[str, int] = {}  # Map sender_id to chat_id for replies
         self._typing_tasks: dict[str, asyncio.Task] = {}  # chat_id -> typing loop task
+        self._draft_enabled = True
     
     async def start(self) -> None:
         """Start the Telegram bot with long polling."""
@@ -192,6 +196,8 @@ class TelegramChannel(BaseChannel):
             chat_id = int(msg.chat_id)
             # Convert markdown to Telegram HTML
             html_content = _markdown_to_telegram_html(msg.content)
+            # Stream partial output in private chats before sending final message.
+            await self._maybe_stream_draft(chat_id, html_content, msg.metadata or {})
             await self._app.bot.send_message(
                 chat_id=chat_id,
                 text=html_content,
@@ -209,6 +215,74 @@ class TelegramChannel(BaseChannel):
                 )
             except Exception as e2:
                 logger.error(f"Error sending Telegram message: {e2}")
+
+    async def _maybe_stream_draft(self, chat_id: int, text: str, metadata: dict) -> None:
+        """Best-effort draft streaming via sendMessageDraft; ignore errors."""
+        if not self._draft_enabled or not text:
+            return
+        # Bot API docs: chat_id is "target private chat" for sendMessageDraft.
+        if metadata.get("is_group") is True:
+            return
+        if len(text) > 4096:
+            return
+
+        draft_id = int(time.time_ns() % 2_147_483_647) or 1
+        message_thread_id = metadata.get("message_thread_id")
+
+        # Send a small number of progressive updates to reduce rate-limit risk.
+        target_steps = 6
+        chunk = max(64, len(text) // target_steps)
+        positions = list(range(chunk, len(text), chunk))
+        if not positions or positions[-1] != len(text):
+            positions.append(len(text))
+
+        for idx, end in enumerate(positions):
+            ok = await self._send_message_draft(
+                chat_id=chat_id,
+                draft_id=draft_id,
+                text=text[:end],
+                message_thread_id=message_thread_id,
+            )
+            if not ok:
+                return
+            if idx < len(positions) - 1:
+                await asyncio.sleep(0.15)
+
+    async def _send_message_draft(
+        self,
+        chat_id: int,
+        draft_id: int,
+        text: str,
+        message_thread_id: int | None = None,
+    ) -> bool:
+        """Call Telegram Bot API sendMessageDraft directly."""
+        if not self.config.token:
+            return False
+
+        payload: dict[str, int | str] = {
+            "chat_id": chat_id,
+            "draft_id": draft_id,
+            "text": text,
+            "parse_mode": "HTML",
+        }
+        if message_thread_id:
+            payload["message_thread_id"] = int(message_thread_id)
+
+        api_url = f"https://api.telegram.org/bot{self.config.token}/sendMessageDraft"
+        try:
+            async with httpx.AsyncClient(timeout=10.0, proxy=self.config.proxy) as client:
+                resp = await client.post(api_url, json=payload)
+            if resp.status_code != 200:
+                logger.debug(f"sendMessageDraft HTTP {resp.status_code}: {resp.text[:200]}")
+                return False
+            data = resp.json()
+            if not data.get("ok"):
+                logger.debug(f"sendMessageDraft API error: {data}")
+                return False
+            return True
+        except Exception as e:
+            logger.debug(f"sendMessageDraft failed: {e}")
+            return False
     
     async def _on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /start command."""

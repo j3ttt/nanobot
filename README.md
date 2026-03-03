@@ -776,6 +776,7 @@ nanobot/
 │   ├── skills.py   #    Skills loader
 │   ├── subagent.py #    Background task execution
 │   └── tools/      #    Built-in tools (incl. spawn)
+├── specs/          # 🧭 SDD specs (feature design docs)
 ├── skills/         # 🎯 Bundled skills (github, weather, tmux...)
 ├── channels/       # 📱 Chat channel integrations
 ├── bus/            # 🚌 Message routing
@@ -790,6 +791,14 @@ nanobot/
 ## 🤝 Contribute & Roadmap
 
 PRs welcome! The codebase is intentionally small and readable. 🤗
+
+### Spec-Driven Development (SDD)
+
+Before implementing a feature, create a spec file under `specs/` with this format:
+
+`specs/YYYY-MM-DD_功能描述.md`
+
+Use the template and workflow in `specs/README.md`.
 
 **Roadmap** — Pick an item and [open a PR](https://github.com/HKUDS/nanobot/pulls)!
 
