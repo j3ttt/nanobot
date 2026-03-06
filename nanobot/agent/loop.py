@@ -285,9 +285,10 @@ class AgentLoop:
                 final_content = response.content
                 break
 
-        if final_content is None:
-            # Tool loop exhausted max_iterations without a text response.
-            # Do one final LLM call (no tools) so the model can summarize.
+        if not final_content:
+            # Either max_iterations exhausted (final_content is None) or LLM
+            # returned empty text without tool calls.  Do one final LLM call
+            # with no tools so the model can produce a summary / wrap-up.
             try:
                 wrap_up = await self.provider.chat(messages=messages, tools=None, model=self.model)
                 final_content = wrap_up.content or ""
@@ -296,7 +297,7 @@ class AgentLoop:
                 final_content = ""
 
         if not final_content:
-            final_content = "I've completed processing but have no response to give."
+            final_content = "（处理完成，但未生成回复。如果这不符合预期，请再说一次。）"
 
         # Log response preview
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
