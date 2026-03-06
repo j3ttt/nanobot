@@ -166,12 +166,27 @@ class ChannelsConfig(BaseModel):
 
 class AgentDefaults(BaseModel):
     """Default agent configuration."""
+    class MemoryWorkerConfig(BaseModel):
+        """Background memory worker configuration."""
+        enabled: bool = True
+        provider: str = ""
+        model: str = "anthropic/claude-haiku"
+        check_interval: int = 300
+        max_idle_hours: float = 4.0
+        max_messages: int = 20
+        retain_recent: int = 6
+        backup_before_trim: bool = False
+        backup_dir: str = ""
+        notify_user: bool = False
+        notification_message: str = "I organized our earlier conversation into memory."
+
     workspace: str = "~/.nanobot/workspace"
     model: str = "anthropic/claude-opus-4-5"
     max_tokens: int = 8192
     temperature: float = 0.7
     max_tool_iterations: int = 20
     memory_window: int = 50
+    memory_worker: MemoryWorkerConfig = Field(default_factory=MemoryWorkerConfig)
 
 
 class AgentsConfig(BaseModel):

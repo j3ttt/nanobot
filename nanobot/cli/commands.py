@@ -269,22 +269,37 @@ This file stores important information that should persist across sessions.
     skills_dir.mkdir(exist_ok=True)
 
 
-def _make_provider(config):
-    """Create LiteLLMProvider from config. Exits if no API key found."""
+def _make_provider(
+    config,
+    model: str | None = None,
+    provider_name: str | None = None,
+    required: bool = True,
+):
+    """Create LiteLLMProvider from config."""
     from nanobot.providers.litellm_provider import LiteLLMProvider
 
-    p = config.get_provider()
-    model = config.agents.defaults.model
+    model = model or config.agents.defaults.model
+    p = None
+
+    if provider_name:
+        p = getattr(config.providers, provider_name, None)
+    if p is None:
+        p = config.get_provider(model)
+
     if not (p and p.api_key) and not model.startswith("bedrock/"):
-        console.print("[red]Error: No API key configured.[/red]")
-        console.print("Set one in ~/.nanobot/config.json under providers section")
-        raise typer.Exit(1)
+        if required:
+            console.print("[red]Error: No API key configured.[/red]")
+            console.print("Set one in ~/.nanobot/config.json under providers section")
+            raise typer.Exit(1)
+        return None
+
+    resolved_provider_name = provider_name or config.get_provider_name(model)
     return LiteLLMProvider(
         api_key=p.api_key if p else None,
-        api_base=config.get_api_base(),
+        api_base=(p.api_base if p and p.api_base else config.get_api_base(model)),
         default_model=model,
         extra_headers=p.extra_headers if p else None,
-        provider_name=config.get_provider_name(),
+        provider_name=resolved_provider_name,
     )
 
 
@@ -302,6 +317,8 @@ def gateway(
     from nanobot.config.loader import load_config, get_data_dir
     from nanobot.bus.queue import MessageBus
     from nanobot.agent.loop import AgentLoop
+    from nanobot.agent.memory import MemoryStore
+    from nanobot.agent.memory_worker import MemoryWorker
     from nanobot.channels.manager import ChannelManager
     from nanobot.session.manager import SessionManager
     from nanobot.cron.service import CronService
@@ -392,6 +409,49 @@ def gateway(
     # Create channel manager
     channels = ChannelManager(config, bus)
 
+    memory_worker = None
+    memory_worker_cfg = config.agents.defaults.memory_worker
+    if memory_worker_cfg.enabled:
+        memory_provider = _make_provider(
+            config,
+            model=memory_worker_cfg.model,
+            provider_name=memory_worker_cfg.provider or None,
+            required=False,
+        )
+        if memory_provider is None:
+            console.print(
+                "[yellow]Warning: memory worker enabled but provider/model is not configured; worker disabled[/yellow]"
+            )
+        else:
+            backup_dir = (
+                Path(memory_worker_cfg.backup_dir).expanduser()
+                if memory_worker_cfg.backup_dir
+                else None
+            )
+
+            async def _notify_user(channel: str, chat_id: str, content: str) -> None:
+                from nanobot.bus.events import OutboundMessage
+
+                await bus.publish_outbound(
+                    OutboundMessage(channel=channel, chat_id=chat_id, content=content)
+                )
+
+            memory_worker = MemoryWorker(
+                session_manager=session_manager,
+                memory_store=MemoryStore(config.workspace_path),
+                provider=memory_provider,
+                model=memory_worker_cfg.model,
+                check_interval=memory_worker_cfg.check_interval,
+                max_idle_hours=memory_worker_cfg.max_idle_hours,
+                max_messages=memory_worker_cfg.max_messages,
+                retain_recent=memory_worker_cfg.retain_recent,
+                backup_before_trim=memory_worker_cfg.backup_before_trim,
+                backup_dir=backup_dir,
+                notify_user=memory_worker_cfg.notify_user,
+                notification_message=memory_worker_cfg.notification_message,
+                notify_callback=_notify_user,
+            )
+
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
@@ -401,18 +461,31 @@ def gateway(
     if cron_status["jobs"] > 0:
         console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
 
+    if memory_worker:
+        console.print(
+            f"[green]✓[/green] Memory worker: every {memory_worker_cfg.check_interval}s "
+            f"(model: {memory_worker_cfg.model})"
+        )
+
     console.print(f"[green]✓[/green] Heartbeat: every 30m")
 
     async def run():
+        memory_task = None
         try:
             await cron.start()
             await heartbeat.start()
+            if memory_worker:
+                memory_task = asyncio.create_task(memory_worker.run())
             await asyncio.gather(
                 agent.run(),
                 channels.start_all(),
             )
         except KeyboardInterrupt:
             console.print("\nShutting down...")
+            if memory_worker:
+                memory_worker.stop()
+            if memory_task:
+                memory_task.cancel()
             heartbeat.stop()
             cron.stop()
             agent.stop()

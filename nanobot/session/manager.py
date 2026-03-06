@@ -1,5 +1,6 @@
 """Session management for conversation history."""
 
+import asyncio
 import json
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -49,8 +50,19 @@ class Session:
         # Get recent messages
         recent = self.messages[-max_messages:] if len(self.messages) > max_messages else self.messages
         
-        # Convert to LLM format (just role and content)
-        return [{"role": m["role"], "content": m["content"]} for m in recent]
+        result: list[dict[str, Any]] = []
+        for message in recent:
+            content = message.get("content", "")
+            if message.get("role") == "user":
+                ts = message.get("timestamp")
+                if ts:
+                    try:
+                        prefix = datetime.fromisoformat(ts).strftime("[%m-%d %H:%M] ")
+                        content = f"{prefix}{content}"
+                    except (TypeError, ValueError):
+                        pass
+            result.append({"role": message["role"], "content": content})
+        return result
     
     def clear(self) -> None:
         """Clear all messages in the session."""
@@ -69,6 +81,13 @@ class SessionManager:
         self.workspace = workspace
         self.sessions_dir = ensure_dir(Path.home() / ".nanobot" / "sessions")
         self._cache: dict[str, Session] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def get_lock(self, key: str) -> asyncio.Lock:
+        """Get a per-session asyncio lock (created on first access)."""
+        if key not in self._locks:
+            self._locks[key] = asyncio.Lock()
+        return self._locks[key]
     
     def _get_session_path(self, key: str) -> Path:
         """Get the file path for a session."""

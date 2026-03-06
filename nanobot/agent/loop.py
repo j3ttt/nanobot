@@ -286,6 +286,16 @@ class AgentLoop:
                 break
 
         if final_content is None:
+            # Tool loop exhausted max_iterations without a text response.
+            # Do one final LLM call (no tools) so the model can summarize.
+            try:
+                wrap_up = await self.provider.chat(messages=messages, tools=None, model=self.model)
+                final_content = wrap_up.content or ""
+            except Exception as e:
+                logger.warning(f"Final wrap-up LLM call failed: {e}")
+                final_content = ""
+
+        if not final_content:
             final_content = "I've completed processing but have no response to give."
 
         # Log response preview
@@ -293,11 +303,13 @@ class AgentLoop:
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
 
         # Save to session (include tool names so consolidation sees what happened)
-        session.add_message("user", msg.content)
-        session.add_message(
-            "assistant", final_content, tools_used=tools_used if tools_used else None
-        )
-        self.sessions.save(session)
+        # Acquire per-session lock to avoid races with memory_worker trimming
+        async with self.sessions.get_lock(session.key):
+            session.add_message("user", msg.content)
+            session.add_message(
+                "assistant", final_content, tools_used=tools_used if tools_used else None
+            )
+            self.sessions.save(session)
 
         return OutboundMessage(
             channel=msg.channel,
@@ -397,9 +409,10 @@ class AgentLoop:
             final_content = "Background task completed."
 
         # Save to session (mark as system message in history)
-        session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
-        session.add_message("assistant", final_content)
-        self.sessions.save(session)
+        async with self.sessions.get_lock(session.key):
+            session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
+            session.add_message("assistant", final_content)
+            self.sessions.save(session)
 
         return OutboundMessage(
             channel=origin_channel,
