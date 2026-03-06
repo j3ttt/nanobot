@@ -3,6 +3,9 @@
 import asyncio
 import base64
 import json
+import mimetypes
+from pathlib import Path
+import re
 import time
 from typing import Any
 
@@ -123,6 +126,19 @@ class DingTalkChannel(BaseChannel):
     """
 
     name = "dingtalk"
+    _MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
+    _MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)]+)\)")
+    _IMAGE_SUFFIXES = {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".webp",
+        ".bmp",
+        ".svg",
+        ".heic",
+        ".heif",
+    }
 
     def __init__(self, config: DingTalkConfig, bus: MessageBus):
         super().__init__(config, bus)
@@ -215,6 +231,25 @@ class DingTalkChannel(BaseChannel):
             logger.error(f"Failed to get DingTalk access token: {e}")
             return None
 
+    @staticmethod
+    def _is_group_chat(conversation_type: Any, chat_id: str | None = None) -> bool:
+        """Best-effort group/private classification for DingTalk conversations."""
+        if isinstance(conversation_type, bool):
+            return conversation_type
+
+        if isinstance(conversation_type, (int, float)):
+            return int(conversation_type) == 2
+
+        if isinstance(conversation_type, str):
+            normalized = conversation_type.strip().lower()
+            if normalized == "2" or normalized == "group":
+                return True
+            if normalized == "1" or normalized == "private":
+                return False
+
+        # Fallback: DingTalk group IDs typically use the cid* format.
+        return bool(chat_id and chat_id.startswith("cid"))
+
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through DingTalk."""
         token = await self._get_access_token()
@@ -226,23 +261,160 @@ class DingTalkChannel(BaseChannel):
             return
 
         headers = {"x-acs-dingtalk-access-token": token}
-        is_group = msg.metadata.get("is_group", False)
+        msgtype = str(msg.metadata.get("msgtype", "")).strip().lower()
+        metadata_is_group = msg.metadata.get("is_group")
+        if isinstance(metadata_is_group, bool):
+            is_group = metadata_is_group
+        else:
+            is_group = self._is_group_chat(
+                msg.metadata.get("conversation_type"),
+                msg.chat_id,
+            )
+
+        if msgtype == "image":
+            image_path = self._resolve_image_path(msg)
+            if not image_path:
+                logger.warning("DingTalk image send skipped: no local image path provided")
+                return
+
+            media_id = await self._upload_local_image(image_path)
+            if not media_id:
+                logger.warning("DingTalk image send skipped: upload failed for {}", image_path)
+                return
+
+            await self._send_payload(
+                msg=msg,
+                headers=headers,
+                is_group=is_group,
+                msg_key="sampleImageMsg",
+                msg_param={"photoURL": media_id},
+            )
+            return
+        else:
+            local_image_paths, cleaned_text = self._extract_local_image_paths(msg.content)
+            if local_image_paths:
+                if cleaned_text:
+                    await self._send_payload(
+                        msg=msg,
+                        headers=headers,
+                        is_group=is_group,
+                        msg_key="sampleMarkdown",
+                        msg_param={
+                            "text": cleaned_text,
+                            "title": "Nanobot Reply",
+                        },
+                    )
+                sent_images = 0
+                for image_path in local_image_paths:
+                    if not Path(image_path).is_file():
+                        logger.warning("DingTalk markdown image skipped: file not found {}", image_path)
+                        continue
+                    media_id = await self._upload_local_image(image_path)
+                    if not media_id:
+                        logger.warning(
+                            "DingTalk markdown image skipped: upload failed for {}",
+                            image_path,
+                        )
+                        continue
+                    await self._send_payload(
+                        msg=msg,
+                        headers=headers,
+                        is_group=is_group,
+                        msg_key="sampleImageMsg",
+                        msg_param={"photoURL": media_id},
+                    )
+                    sent_images += 1
+
+                # Fallback: if message only contained image markup and all image sends failed,
+                # send the original text to avoid dropping the message entirely.
+                if not cleaned_text and sent_images == 0:
+                    await self._send_payload(
+                        msg=msg,
+                        headers=headers,
+                        is_group=is_group,
+                        msg_key="sampleMarkdown",
+                        msg_param={
+                            "text": msg.content,
+                            "title": "Nanobot Reply",
+                        },
+                    )
+                return
+
+            await self._send_payload(
+                msg=msg,
+                headers=headers,
+                is_group=is_group,
+                msg_key="sampleMarkdown",
+                msg_param={
+                    "text": msg.content,
+                    "title": "Nanobot Reply",
+                },
+            )
+
+    def _extract_local_image_paths(self, content: str) -> tuple[list[str], str]:
+        """Extract absolute local image paths from markdown image tags."""
+        local_paths: list[str] = []
+
+        def _replace(match: re.Match[str]) -> str:
+            target = match.group(1).strip()
+            if target.startswith("<") and target.endswith(">"):
+                target = target[1:-1].strip()
+            if not target:
+                return match.group(0)
+
+            path_candidate = target.split(maxsplit=1)[0].strip()
+            expanded = Path(path_candidate).expanduser()
+            if not expanded.is_absolute():
+                return match.group(0)
+
+            local_paths.append(str(expanded.resolve()))
+            return ""
+
+        cleaned = self._MARKDOWN_IMAGE_RE.sub(_replace, content)
+
+        def _replace_link(match: re.Match[str]) -> str:
+            target = match.group(2).strip()
+            if target.startswith("<") and target.endswith(">"):
+                target = target[1:-1].strip()
+            if not target:
+                return match.group(0)
+
+            path_candidate = target.split(maxsplit=1)[0].strip()
+            expanded = Path(path_candidate).expanduser()
+            if not expanded.is_absolute():
+                return match.group(0)
+            if expanded.suffix.lower() not in self._IMAGE_SUFFIXES:
+                return match.group(0)
+
+            local_paths.append(str(expanded.resolve()))
+            return ""
+
+        cleaned = self._MARKDOWN_LINK_RE.sub(_replace_link, cleaned)
+        deduped = list(dict.fromkeys(local_paths))
+        return deduped, cleaned.strip()
+
+    async def _send_payload(
+        self,
+        msg: OutboundMessage,
+        headers: dict[str, str],
+        is_group: bool,
+        msg_key: str,
+        msg_param: dict[str, Any],
+    ) -> None:
+        """Send one DingTalk message payload."""
+        if not self._http:
+            logger.warning("DingTalk HTTP client not initialized, cannot send")
+            return
 
         if is_group:
             # Group chat: use groupMessages/send with openConversationId
             # https://open.dingtalk.com/document/orgapp/the-robot-sends-a-group-message
-
             url = "https://api.dingtalk.com/v1.0/robot/groupMessages/send"
             data = {
                 "robotCode": self.config.client_id,
                 "openConversationId": msg.chat_id,
-                "msgKey": "sampleMarkdown",
-                "msgParam": json.dumps(
-                    {
-                        "text": msg.content,
-                        "title": "Nanobot Reply",
-                    }
-                ),
+                "msgKey": msg_key,
+                "msgParam": json.dumps(msg_param),
             }
         else:
             # Private chat: use oToMessages/batchSend with userIds
@@ -251,13 +423,8 @@ class DingTalkChannel(BaseChannel):
             data = {
                 "robotCode": self.config.client_id,
                 "userIds": [msg.chat_id],
-                "msgKey": "sampleMarkdown",
-                "msgParam": json.dumps(
-                    {
-                        "text": msg.content,
-                        "title": "Nanobot Reply",
-                    }
-                ),
+                "msgKey": msg_key,
+                "msgParam": json.dumps(msg_param),
             }
 
         try:
@@ -268,6 +435,107 @@ class DingTalkChannel(BaseChannel):
                 logger.debug(f"DingTalk message sent to {msg.chat_id} (is_group={is_group})")
         except Exception as e:
             logger.error(f"Error sending DingTalk message: {e}")
+
+    def _resolve_image_path(self, msg: OutboundMessage) -> str | None:
+        """Resolve local image path from outbound metadata/media."""
+        candidates: list[Any] = [
+            msg.metadata.get("image_path"),
+            msg.metadata.get("local_path"),
+            msg.metadata.get("file_path"),
+            msg.content if isinstance(msg.content, str) else None,
+        ]
+        if msg.media:
+            candidates.extend(msg.media)
+
+        for candidate in candidates:
+            if not isinstance(candidate, str):
+                continue
+            value = candidate.strip()
+            if not value:
+                continue
+            expanded = Path(value).expanduser()
+            if expanded.is_file():
+                return str(expanded.resolve())
+        return None
+
+    async def _upload_local_image(self, local_path: str) -> str | None:
+        """Upload a local image to DingTalk and return media_id."""
+        token = await self._get_access_token()
+        if not token:
+            logger.warning("Cannot upload DingTalk image: missing access token")
+            return None
+        if not self._http:
+            logger.warning("Cannot upload DingTalk image: HTTP client not initialized")
+            return None
+
+        file_path = Path(local_path).expanduser()
+        if not file_path.is_file():
+            logger.warning("Cannot upload DingTalk image: file not found {}", local_path)
+            return None
+
+        mime = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        payload: tuple[str, bytes, str]
+        try:
+            payload = (file_path.name, file_path.read_bytes(), mime)
+        except OSError as e:
+            logger.warning("Cannot upload DingTalk image {}: {}", local_path, e)
+            return None
+
+        headers = {"x-acs-dingtalk-access-token": token}
+        uploads = [
+            {
+                "url": "https://api.dingtalk.com/v1.0/robot/messageFiles/upload",
+                "kwargs": {
+                    "data": {
+                        "robotCode": self.config.client_id,
+                        "type": "image",
+                    },
+                    "files": {"media": payload},
+                    "headers": headers,
+                },
+            },
+            {
+                "url": "https://oapi.dingtalk.com/media/upload",
+                "kwargs": {
+                    "params": {"access_token": token, "type": "image"},
+                    "files": {"media": payload},
+                },
+            },
+        ]
+
+        for upload in uploads:
+            media_id = await self._try_upload_media(upload["url"], upload["kwargs"])
+            if media_id:
+                return media_id
+
+        logger.warning("Failed to upload DingTalk image after trying all endpoints: {}", local_path)
+        return None
+
+    async def _try_upload_media(self, url: str, kwargs: dict[str, Any]) -> str | None:
+        """Try one DingTalk upload endpoint and parse media_id from response."""
+        if not self._http:
+            return None
+
+        try:
+            resp = await self._http.post(url, **kwargs)
+            if resp.status_code != 200:
+                logger.warning("DingTalk image upload failed ({}): {}", url, resp.text)
+                return None
+            data = resp.json()
+            media_id = (
+                data.get("media_id")
+                or data.get("mediaId")
+                or data.get("downloadCode")
+                or data.get("download_code")
+            )
+            if media_id:
+                logger.debug("DingTalk image uploaded via {} -> {}", url, media_id)
+                return str(media_id)
+            logger.warning("DingTalk image upload response missing media id ({}): {}", url, data)
+            return None
+        except Exception as e:
+            logger.warning("DingTalk image upload error ({}): {}", url, e)
+            return None
 
     def _extract_image_download_codes(
         self, chatbot_msg: Any, raw_data: dict[str, Any]
@@ -408,7 +676,7 @@ class DingTalkChannel(BaseChannel):
         sender_id: str,
         sender_name: str,
         conversation_id: str,
-        conversation_type: str,
+        conversation_type: Any,
         media: list[str] | None = None,
         message_type: str | None = None,
     ) -> None:
@@ -419,7 +687,7 @@ class DingTalkChannel(BaseChannel):
         """
         try:
             # conversation_type: "1" = private chat, "2" = group chat
-            is_group = conversation_type == "2"
+            is_group = self._is_group_chat(conversation_type, conversation_id)
 
             logger.info(f"DingTalk inbound: {content} from {sender_name} (is_group={is_group})")
             await self._handle_message(
@@ -432,6 +700,7 @@ class DingTalkChannel(BaseChannel):
                     "platform": "dingtalk",
                     "is_group": is_group,
                     "conversation_id": conversation_id,
+                    "conversation_type": conversation_type,
                     "message_type": message_type,
                 },
             )
