@@ -21,6 +21,7 @@ class SpawnTool(Tool):
         self._origin_channel = "cli"
         self._origin_chat_id = "direct"
         self._origin_metadata: dict[str, Any] = {}
+        self._session_key = "cli:direct"
 
     def set_context(
         self, channel: str, chat_id: str, metadata: dict[str, Any] | None = None
@@ -29,6 +30,7 @@ class SpawnTool(Tool):
         self._origin_channel = channel
         self._origin_chat_id = chat_id
         self._origin_metadata = metadata or {}
+        self._session_key = f"{channel}:{chat_id}"
 
     @property
     def name(self) -> str:
@@ -67,4 +69,5 @@ class SpawnTool(Tool):
             origin_channel=self._origin_channel,
             origin_chat_id=self._origin_chat_id,
             origin_metadata=self._origin_metadata,
+            session_key=self._session_key,
         )

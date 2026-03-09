@@ -1,3 +1,4 @@
+.worktrees/
 .assets
 .env
 *.pyc
@@ -18,6 +19,5 @@ venv/
 __pycache__/
 poetry.lock
 .pytest_cache/
-tests/
 botpy.log
 .python-version

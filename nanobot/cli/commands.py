@@ -343,14 +343,32 @@ def gateway(
 
     # Prepare MCP config
     mcp_config = None
-    if config.mcp.enabled or config.tools.mcp.enabled:
-        # Support both top-level and tools.mcp config
-        mcp_cfg = config.mcp if config.mcp.enabled else config.tools.mcp
+    tools_mcp_enabled = getattr(getattr(config.tools, "mcp", None), "enabled", False)
+    tools_mcp_servers = getattr(config.tools, "mcp_servers", {})
+    if config.mcp.enabled or tools_mcp_enabled or tools_mcp_servers:
+        # Support top-level mcp, legacy tools.mcp, and upstream tools.mcp_servers
+        if config.mcp.enabled:
+            mcp_cfg = config.mcp
+            mcp_servers = mcp_cfg.servers
+        elif tools_mcp_enabled:
+            mcp_cfg = config.tools.mcp
+            mcp_servers = mcp_cfg.servers
+        else:
+            mcp_cfg = None
+            mcp_servers = tools_mcp_servers
         mcp_config = {
             "enabled": True,
             "servers": {
-                name: {"command": srv.command, "args": srv.args, "env": srv.env}
-                for name, srv in mcp_cfg.servers.items()
+                name: {
+                    "command": srv.command,
+                    "args": srv.args,
+                    "env": srv.env,
+                    **({"url": srv.url} if getattr(srv, "url", "") else {}),
+                    **({"headers": srv.headers} if getattr(srv, "headers", None) else {}),
+                    **({"type": srv.type} if getattr(srv, "type", None) else {}),
+                    **({"tool_timeout": srv.tool_timeout} if getattr(srv, "tool_timeout", None) else {}),
+                }
+                for name, srv in mcp_servers.items()
             },
         }
 
@@ -979,15 +997,16 @@ def mcp_list():
 
     config = load_config()
 
-    # Check both top-level and tools.mcp
+    tools_mcp_enabled = getattr(getattr(config.tools, "mcp", None), "enabled", False)
     mcp_config = config.mcp if config.mcp.enabled else config.tools.mcp
+    servers = mcp_config.servers if getattr(mcp_config, "enabled", False) else getattr(config.tools, "mcp_servers", {})
 
-    if not mcp_config.enabled:
+    if not getattr(mcp_config, "enabled", False) and not servers:
         console.print("[yellow]MCP is not enabled[/yellow]")
         console.print("Enable it in ~/.nanobot/config.json")
         return
 
-    if not mcp_config.servers:
+    if not servers:
         console.print("No MCP servers configured.")
         return
 
@@ -996,7 +1015,7 @@ def mcp_list():
     table.add_column("Command", style="green")
     table.add_column("Args", style="yellow")
 
-    for name, server in mcp_config.servers.items():
+    for name, server in servers.items():
         args_str = " ".join(server.args) if server.args else "(none)"
         table.add_row(name, server.command, args_str)
 
@@ -1013,17 +1032,19 @@ def mcp_test(
     from nanobot.mcp.client import MCPClient
 
     config = load_config()
+    tools_mcp_enabled = getattr(getattr(config.tools, "mcp", None), "enabled", False)
     mcp_config = config.mcp if config.mcp.enabled else config.tools.mcp
+    servers = mcp_config.servers if getattr(mcp_config, "enabled", False) else getattr(config.tools, "mcp_servers", {})
 
-    if not mcp_config.enabled:
+    if not getattr(mcp_config, "enabled", False) and not servers:
         console.print("[red]MCP is not enabled[/red]")
         raise typer.Exit(1)
 
-    if server not in mcp_config.servers:
+    if server not in servers:
         console.print(f"[red]Server '{server}' not found in config[/red]")
         raise typer.Exit(1)
 
-    srv = mcp_config.servers[server]
+    srv = servers[server]
 
     async def test():
         console.print(f"Testing connection to '{server}'...")

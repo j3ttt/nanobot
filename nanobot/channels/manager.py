@@ -148,6 +148,29 @@ class ChannelManager:
             except ImportError as e:
                 logger.warning(f"QQ channel not available: {e}")
 
+        # Matrix channel
+        if self.config.channels.matrix.enabled:
+            try:
+                from nanobot.channels.matrix import MatrixChannel
+
+                self.channels["matrix"] = MatrixChannel(
+                    self.config.channels.matrix,
+                    self.bus,
+                )
+                logger.info("Matrix channel enabled")
+            except ImportError as e:
+                logger.warning(f"Matrix channel not available: {e}")
+
+        self._validate_allow_from()
+
+    def _validate_allow_from(self) -> None:
+        for name, channel in self.channels.items():
+            if getattr(channel.config, "allow_from", None) == []:
+                raise SystemExit(
+                    f'Error: "{name}" has empty allowFrom (denies all). '
+                    f'Set ["*"] to allow everyone, or add specific user IDs.'
+                )
+
     async def _start_channel(self, name: str, channel: BaseChannel) -> None:
         """Start a channel and log any exceptions."""
         try:
