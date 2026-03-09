@@ -1,0 +1,107 @@
+{
+  "feeds": [
+    {
+      "name": "X @emollick",
+      "url": "https://rsshub.app/twitter/user/emollick",
+      "category": "AI/Tech",
+      "enabled": false,
+      "_note": "需自部署 RSSHub 并配置 Twitter token 才能用"
+    },
+    {
+      "name": "Hacker News Best",
+      "url": "https://hnrss.org/best",
+      "category": "AI/Tech",
+      "enabled": true
+    },
+    {
+      "name": "Hacker News AI",
+      "url": "https://hnrss.org/newest?q=AI+OR+LLM+OR+GPT",
+      "category": "AI/Tech",
+      "enabled": true
+    },
+    {
+      "name": "Lobsters",
+      "url": "https://lobste.rs/rss",
+      "category": "AI/Tech",
+      "enabled": true
+    },
+    {
+      "name": "TechCrunch AI",
+      "url": "https://techcrunch.com/category/artificial-intelligence/feed/",
+      "category": "AI/Tech",
+      "enabled": true
+    },
+    {
+      "name": "Reddit r/netsec",
+      "url": "https://www.reddit.com/r/netsec/.rss",
+      "category": "Security",
+      "enabled": true
+    },
+    {
+      "name": "The Hacker News",
+      "url": "https://feeds.feedburner.com/TheHackersNews",
+      "category": "Security",
+      "enabled": true
+    },
+    {
+      "name": "Krebs on Security",
+      "url": "https://krebsonsecurity.com/feed/",
+      "category": "Security",
+      "enabled": true
+    },
+    {
+      "name": "CNCF Blog",
+      "url": "https://www.cncf.io/blog/feed/",
+      "category": "Cloud Native",
+      "enabled": true
+    },
+    {
+      "name": "Kubernetes Blog",
+      "url": "https://kubernetes.io/feed.xml",
+      "category": "Cloud Native",
+      "enabled": true
+    },
+    {
+      "name": "机核 GCores",
+      "url": "https://www.gcores.com/rss",
+      "category": "Gaming",
+      "enabled": true
+    },
+    {
+      "name": "IGN All",
+      "url": "https://feeds.feedburner.com/ign/all",
+      "category": "Gaming",
+      "enabled": true
+    },
+    {
+      "name": "Reddit r/games",
+      "url": "https://www.reddit.com/r/games/.rss",
+      "category": "Gaming",
+      "enabled": true
+    },
+    {
+      "name": "Reddit r/indiegaming",
+      "url": "https://www.reddit.com/r/indiegaming/.rss",
+      "category": "Indie Dev",
+      "enabled": true
+    },
+    {
+      "name": "Indie Hackers",
+      "url": "https://www.indiehackers.com/feed.xml",
+      "category": "Indie Dev",
+      "enabled": false
+    },
+    {
+      "name": "CoinDesk",
+      "url": "https://www.coindesk.com/arc/outboundfeeds/rss/",
+      "category": "Crypto",
+      "enabled": true
+    },
+    {
+      "name": "Reddit r/cryptocurrency",
+      "url": "https://www.reddit.com/r/CryptoCurrency/.rss",
+      "category": "Crypto",
+      "enabled": true
+    }
+  ]
+}
