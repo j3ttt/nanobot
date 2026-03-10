@@ -82,7 +82,6 @@ class MCPClient:
             init_response = await self._send_request("initialize", {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {
-                    "roots": {"listChanged": False},
                     "sampling": {}
                 },
                 "clientInfo": {
@@ -172,8 +171,12 @@ class MCPClient:
                 if not line:
                     break
 
+                decoded = line.decode("utf-8", errors="replace").strip()
+                if not decoded:
+                    continue
+
                 try:
-                    response = json.loads(line.decode())
+                    response = json.loads(decoded)
                     msg_id = response.get("id")
 
                     if msg_id is not None and msg_id in self._pending_requests:
@@ -189,8 +192,8 @@ class MCPClient:
                         # Server-initiated notification or unmatched response
                         logger.debug(f"MCP[{self.name}] unmatched message: {response}")
 
-                except json.JSONDecodeError as e:
-                    logger.error(f"MCP[{self.name}] invalid JSON response: {e}")
+                except json.JSONDecodeError:
+                    logger.debug("MCP[{}] non-JSON stdout: {}", self.name, decoded[:200])
                 except Exception as e:
                     logger.error(f"MCP[{self.name}] read loop error processing message: {e}")
 
@@ -353,6 +356,9 @@ class MCPClient:
             return None
         except Exception as e:
             self._pending_requests.pop(msg_id, None)
+            if "Method not found" in str(e) and method in {"resources/list", "prompts/list", "roots/list"}:
+                logger.debug("MCP server '{}' does not support {}", self.name, method)
+                return None
             logger.error(f"MCP server '{self.name}' request failed: {e}")
             return None
 
