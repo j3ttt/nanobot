@@ -20,6 +20,7 @@ from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.subagent import SubagentManager
+from nanobot.agent.usage import UsageTracker
 from nanobot.session.manager import SessionManager
 
 
@@ -79,6 +80,9 @@ class AgentLoop:
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
         )
+
+        # Token usage tracker
+        self.usage_tracker = UsageTracker()
 
         # MCP Manager for Model Context Protocol servers
         self.mcp_manager = None
@@ -245,6 +249,7 @@ class AgentLoop:
             response = await self.provider.chat(
                 messages=messages, tools=self.tools.get_definitions(), model=self.model
             )
+            self.usage_tracker.record(response.usage)
 
             # Handle tool calls
             if response.has_tool_calls:
@@ -290,7 +295,8 @@ class AgentLoop:
             # returned empty text without tool calls.  Do one final LLM call
             # with no tools so the model can produce a summary / wrap-up.
             try:
-                wrap_up = await self.provider.chat(messages=messages, tools=None, model=self.model)
+                wrap_up = await self.provider.chat(messages=messages, tools=self.tools.get_definitions(), model=self.model)
+                self.usage_tracker.record(wrap_up.usage)
                 final_content = wrap_up.content or ""
             except Exception as e:
                 logger.warning(f"Final wrap-up LLM call failed: {e}")
@@ -374,6 +380,7 @@ class AgentLoop:
             response = await self.provider.chat(
                 messages=messages, tools=self.tools.get_definitions(), model=self.model
             )
+            self.usage_tracker.record(response.usage)
 
             if response.has_tool_calls:
                 tool_call_dicts = [

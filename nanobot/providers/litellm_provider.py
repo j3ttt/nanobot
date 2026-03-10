@@ -269,6 +269,11 @@ class LiteLLMProvider(LLMProvider):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
+        # Anthropic prompt caching: mark system message and last user turn
+        # so the ~20k-token system prompt is cached across requests.
+        if self._is_anthropic_model(model):
+            self._inject_cache_control(kwargs["messages"])
+
         try:
             response = await acompletion(**kwargs)
             return self._parse_response(response)
@@ -278,6 +283,37 @@ class LiteLLMProvider(LLMProvider):
                 content=f"Error calling LLM: {str(e)}",
                 finish_reason="error",
             )
+
+    @staticmethod
+    def _is_anthropic_model(model: str) -> bool:
+        """Check if the resolved model targets Anthropic (direct or via gateway)."""
+        m = model.lower()
+        return "claude" in m or "anthropic" in m
+
+    @staticmethod
+    def _inject_cache_control(messages: list[dict[str, Any]]) -> None:
+        """Add cache_control breakpoints for Anthropic prompt caching.
+
+        Strategy:
+        - Mark the system message (largest, most stable block ~20k tokens).
+        - Mark the second-to-last user message (conversation history prefix)
+          so incremental turns also benefit from caching.
+
+        Anthropic allows up to 4 cache breakpoints per request.
+        Cached content is billed at 1/10 the normal input price on cache hits
+        (with a 25% surcharge on the first write).
+        """
+        cache_marker = {"type": "ephemeral"}
+
+        for msg in messages:
+            if msg.get("role") == "system":
+                # If content is a plain string, add cache_control at message level
+                if isinstance(msg.get("content"), str):
+                    msg["cache_control"] = cache_marker
+                # If content is a list of blocks, mark the last block
+                elif isinstance(msg.get("content"), list) and msg["content"]:
+                    msg["content"][-1]["cache_control"] = cache_marker
+                break  # Only one system message
 
     def _parse_response(self, response: Any) -> LLMResponse:
         """Parse LiteLLM response into our standard format."""
@@ -317,11 +353,17 @@ class LiteLLMProvider(LLMProvider):
 
         usage = {}
         if hasattr(response, "usage") and response.usage:
+            logger.debug(f"[usage-debug] raw usage object: {response.usage}")
             usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
+                "prompt_tokens": response.usage.prompt_tokens or 0,
+                "completion_tokens": response.usage.completion_tokens or 0,
+                "total_tokens": response.usage.total_tokens or 0,
             }
+            # Extract cache info from prompt_tokens_details
+            details = getattr(response.usage, "prompt_tokens_details", None)
+            if details:
+                usage["cache_read_tokens"] = getattr(details, "cached_tokens", 0) or 0
+                usage["cache_creation_tokens"] = getattr(details, "cache_creation_tokens", 0) or 0
 
         reasoning_content = getattr(message, "reasoning_content", None) or None
         thinking_blocks = getattr(message, "thinking_blocks", None) or None
