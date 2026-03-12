@@ -88,6 +88,7 @@ class AgentLoop:
         self.mcp_manager = None
 
         self._running = False
+        self._cancelled_sessions: set[str] = set()
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -244,6 +245,13 @@ class AgentLoop:
 
         while iteration < self.max_iterations:
             iteration += 1
+
+            # Check if this session has been cancelled via /stop
+            session_key_check = session_key or msg.session_key
+            if session_key_check in self._cancelled_sessions:
+                logger.info(f"Session {session_key_check} cancelled by /stop")
+                final_content = ""
+                break
 
             # Call LLM
             response = await self.provider.chat(
@@ -561,7 +569,9 @@ Respond with ONLY valid JSON, no markdown fences."""
         cmd = parts[0].lower() if parts else ""
         args = parts[1:] if len(parts) > 1 else []
 
-        if cmd == "/model":
+        if cmd == "/stop":
+            return await self._cmd_stop(msg, args)
+        elif cmd == "/model":
             return await self._cmd_model(msg, args)
         elif cmd == "/models":
             return await self._cmd_models(msg, args)
@@ -646,13 +656,42 @@ Respond with ONLY valid JSON, no markdown fences."""
             metadata=msg.metadata,
         )
 
+    async def _cmd_stop(self, msg: InboundMessage, args: list[str]) -> OutboundMessage:
+        """Handle /stop command: cancel all running tasks for this session."""
+        session_key = msg.session_key
+
+        # 1. Mark session as cancelled so the agent loop breaks on next iteration
+        self._cancelled_sessions.add(session_key)
+
+        # 2. Cancel all subagents for this session
+        cancelled_count = await self.subagents.cancel_by_session(session_key)
+
+        # 3. Clear the cancellation flag after a short delay (allow current loop to see it)
+        async def _clear_flag():
+            await asyncio.sleep(2)
+            self._cancelled_sessions.discard(session_key)
+
+        asyncio.create_task(_clear_flag())
+
+        parts = ["🛑 已停止。"]
+        if cancelled_count > 0:
+            parts.append(f"终止了 {cancelled_count} 个后台任务。")
+
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=" ".join(parts),
+            metadata=msg.metadata,
+        )
+
     async def _cmd_help(self, msg: InboundMessage, args: list[str]) -> OutboundMessage:
         """Handle /help command."""
-        help_text = """📖 **Available Commands:**
+        help_text = """📖 Available Commands:
 
-`/model [name]` - Show or switch current model
-`/models` - List configured providers
-`/help` - Show this help message
+/stop - 停止当前任务和所有后台任务
+/model [name] - 查看或切换模型
+/models - 列出可用模型
+/help - 显示帮助
 """
         return OutboundMessage(
             channel=msg.channel,
