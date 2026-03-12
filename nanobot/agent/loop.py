@@ -253,6 +253,15 @@ class AgentLoop:
 
             # Handle tool calls
             if response.has_tool_calls:
+                # Push intermediate text to user before executing tools
+                if response.content and response.content.strip():
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=response.content,
+                        metadata=msg.metadata or {},
+                    ))
+
                 # Add assistant message with tool calls
                 tool_call_dicts = [
                     {
@@ -383,6 +392,15 @@ class AgentLoop:
             self.usage_tracker.record(response.usage)
 
             if response.has_tool_calls:
+                # Push intermediate text to user before executing tools
+                if response.content and response.content.strip():
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=origin_channel,
+                        chat_id=origin_chat_id,
+                        content=response.content,
+                        metadata=msg.metadata or {},
+                    ))
+
                 tool_call_dicts = [
                     {
                         "id": tc.id,
