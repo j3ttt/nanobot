@@ -63,6 +63,11 @@ def _validate_schedule_for_add(schedule: CronSchedule) -> None:
 class CronService:
     """Service for managing and executing scheduled jobs."""
 
+    # Watchdog interval: check for overdue jobs every 30 seconds.
+    # This catches jobs missed during macOS sleep (asyncio.sleep freezes
+    # while wall-clock advances, so the precise timer may never fire).
+    WATCHDOG_INTERVAL_S = 30
+
     def __init__(
         self,
         store_path: Path,
@@ -73,6 +78,7 @@ class CronService:
         self._store: CronStore | None = None
         self._last_mtime: float = 0.0
         self._timer_task: asyncio.Task | None = None
+        self._watchdog_task: asyncio.Task | None = None
         self._running = False
 
     def _load_store(self) -> CronStore:
@@ -107,6 +113,7 @@ class CronService:
                             deliver=j["payload"].get("deliver", False),
                             channel=j["payload"].get("channel"),
                             to=j["payload"].get("to"),
+                            session_key=j["payload"].get("sessionKey"),
                         ),
                         state=CronJobState(
                             next_run_at_ms=j.get("state", {}).get("nextRunAtMs"),
@@ -154,6 +161,7 @@ class CronService:
                         "deliver": j.payload.deliver,
                         "channel": j.payload.channel,
                         "to": j.payload.to,
+                        "sessionKey": j.payload.session_key,
                     },
                     "state": {
                         "nextRunAtMs": j.state.next_run_at_ms,
@@ -179,6 +187,7 @@ class CronService:
         self._recompute_next_runs()
         self._save_store()
         self._arm_timer()
+        self._start_watchdog()
         logger.info("Cron service started with {} jobs", len(self._store.jobs if self._store else []))
 
     def stop(self) -> None:
@@ -187,6 +196,46 @@ class CronService:
         if self._timer_task:
             self._timer_task.cancel()
             self._timer_task = None
+        if self._watchdog_task:
+            self._watchdog_task.cancel()
+            self._watchdog_task = None
+
+    def _start_watchdog(self) -> None:
+        """Start a periodic watchdog that catches jobs missed during system sleep.
+
+        macOS suspends asyncio.sleep timers when the lid is closed, but
+        wall-clock time keeps advancing.  When the system wakes, the precise
+        timer scheduled by _arm_timer may have already drifted past the
+        target.  This watchdog polls every WATCHDOG_INTERVAL_S seconds using
+        time.time() comparison so it reliably detects overdue jobs after wake.
+        """
+        if self._watchdog_task:
+            self._watchdog_task.cancel()
+
+        async def _watchdog_loop() -> None:
+            while self._running:
+                await asyncio.sleep(self.WATCHDOG_INTERVAL_S)
+                if not self._running:
+                    break
+                try:
+                    self._load_store()
+                    if not self._store:
+                        continue
+                    now = _now_ms()
+                    due = [
+                        j for j in self._store.jobs
+                        if j.enabled and j.state.next_run_at_ms and now >= j.state.next_run_at_ms
+                    ]
+                    if due:
+                        logger.info("Cron watchdog: found {} overdue job(s), executing", len(due))
+                        for job in due:
+                            await self._execute_job(job)
+                        self._save_store()
+                        self._arm_timer()
+                except Exception as e:
+                    logger.error("Cron watchdog error: {}", e)
+
+        self._watchdog_task = asyncio.create_task(_watchdog_loop())
 
     def _recompute_next_runs(self) -> None:
         """Recompute next run times for all enabled jobs."""
@@ -292,6 +341,7 @@ class CronService:
         channel: str | None = None,
         to: str | None = None,
         delete_after_run: bool = False,
+        session_key: str | None = None,
     ) -> CronJob:
         """Add a new job."""
         store = self._load_store()
@@ -309,6 +359,7 @@ class CronService:
                 deliver=deliver,
                 channel=channel,
                 to=to,
+                session_key=session_key,
             ),
             state=CronJobState(next_run_at_ms=_compute_next_run(schedule, now)),
             created_at_ms=now,

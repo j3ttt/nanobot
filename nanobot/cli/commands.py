@@ -395,7 +395,7 @@ def gateway(
         """Execute a cron job through the agent."""
         response = await agent.process_direct(
             job.payload.message,
-            session_key=f"cron:{job.id}",
+            session_key=job.payload.session_key or f"cron:{job.id}",
             channel=job.payload.channel or "cli",
             chat_id=job.payload.to or "direct",
         )

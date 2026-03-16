@@ -2,6 +2,9 @@
 
 import asyncio
 import json
+import random
+import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -322,6 +325,9 @@ class AgentLoop:
         if not final_content:
             final_content = "（处理完成，但未生成回复。如果这不符合预期，请再说一次。）"
 
+        # Extract structured signals from LLM response and strip the block
+        final_content, signals = self._extract_signals(final_content)
+
         # Log response preview
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
@@ -335,12 +341,110 @@ class AgentLoop:
             )
             self.sessions.save(session)
 
+        # Curiosity ping: reset timer on every user message
+        if msg.channel != "system":
+            self._reset_curiosity_ping(msg, signals)
+
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=final_content,
             metadata=msg.metadata
             or {},  # Pass through for channel-specific needs (e.g. Slack thread_ts)
+        )
+
+    # Regex to extract structured signals from LLM response
+    _SIGNAL_RE = re.compile(r"<!--signals\s*\n(\{.*?\})\s*\n-->", re.DOTALL)
+
+    # Patterns that indicate the user is going to sleep (fallback for signal extraction)
+    _SLEEP_PATTERNS = re.compile(
+        r"(晚安|睡了|睡觉|去睡|good\s*night|going to (bed|sleep)|gn\b|nighty?\s*night)",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _extract_signals(content: str) -> tuple[str, dict]:
+        """Extract structured signals from LLM response and strip the block.
+
+        Returns:
+            (cleaned_content, signals_dict)
+        """
+        match = AgentLoop._SIGNAL_RE.search(content)
+        if not match:
+            return content, {}
+        try:
+            signals = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse signals JSON: {match.group(1)}")
+            signals = {}
+        cleaned = content[: match.start()].rstrip()
+        if match.end() < len(content):
+            # Preserve any content after the signal block (unlikely but safe)
+            cleaned += content[match.end():]
+        return cleaned, signals
+
+    def _reset_curiosity_ping(self, msg: InboundMessage, signals: dict | None = None) -> None:
+        """Reset the curiosity ping timer for this session.
+
+        Every user message resets a 2-8h random one-shot timer.
+        When it fires, the agent sends a casual "what are you up to?" message.
+        If the user's message looks like a sleep/goodnight intent, no timer is set.
+
+        Args:
+            msg: The inbound user message.
+            signals: Structured signals extracted from the LLM response.
+        """
+        if not self.cron_service:
+            return
+
+        session_key = msg.session_key
+        job_name = f"curiosity-ping:{session_key}"
+
+        # 1. Remove existing curiosity ping for this session
+        for job in self.cron_service.list_jobs(include_disabled=True):
+            if job.name == job_name:
+                self.cron_service.remove_job(job.id)
+
+        # 2. Sleep intent: prefer structured signal, fallback to regex
+        sleep_intent = False
+        if signals and signals.get("sleep_intent"):
+            sleep_intent = True
+        elif self._SLEEP_PATTERNS.search(msg.content):
+            sleep_intent = True
+
+        if sleep_intent:
+            logger.debug("Curiosity ping skipped: sleep intent detected")
+            return
+
+        # 3. Create new one-shot job, 2~8 hours from now
+        delay_hours = random.uniform(2, 8)
+        delay_ms = int(delay_hours * 3600 * 1000)
+        at_ms = int(time.time() * 1000) + delay_ms
+
+        from nanobot.cron.types import CronSchedule
+
+        self.cron_service.add_job(
+            name=job_name,
+            schedule=CronSchedule(kind="at", at_ms=at_ms),
+            message=(
+                "[System: Curiosity Ping]\n"
+                "It's been a while since the user last messaged. "
+                "You're curious what they've been up to. Send them a casual message — "
+                "wonder what they're doing, maybe reference something from recent conversation. "
+                "Keep it natural, short, and in character. Don't be formal or robotic. "
+                "Don't mention that this is a scheduled/automatic message."
+            ),
+            deliver=True,
+            channel=msg.channel,
+            to=msg.chat_id,
+            session_key=session_key,
+            delete_after_run=True,
+        )
+
+        trigger_time = time.strftime("%H:%M", time.localtime((at_ms) / 1000))
+        logger.info(
+            "Curiosity ping armed for {} in {:.1f}h (at ~{})",
+            session_key, delay_hours, trigger_time,
         )
 
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:

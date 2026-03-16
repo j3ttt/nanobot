@@ -27,6 +27,7 @@ class CronPayload:
     deliver: bool = False
     channel: str | None = None  # e.g. "whatsapp"
     to: str | None = None  # e.g. phone number
+    session_key: str | None = None  # Override session_key for process_direct
 
 
 @dataclass

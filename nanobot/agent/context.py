@@ -94,7 +94,19 @@ Your workspace is at: {workspace_path}
 - If a tool call fails, analyze the error before retrying with a different approach.
 - Ask for clarification when the request is ambiguous.
 
-Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
+Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel.
+
+## Structured Signals
+At the end of EVERY reply, append a hidden signal block. The user will not see it.
+Format (MUST be the last thing in your reply):
+
+<!--signals
+{{"sleep_intent": false}}
+-->
+
+- sleep_intent: set to true if the user expressed intent to sleep, go to bed, or sign off for the night.
+- ALWAYS include this block, even if all values are false/default.
+- The block MUST be valid JSON inside an HTML comment."""
 
     @staticmethod
     def _build_runtime_context(channel: str | None, chat_id: str | None) -> str:
