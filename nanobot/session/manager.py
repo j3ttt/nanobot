@@ -57,7 +57,19 @@ class Session:
 
         out: list[dict[str, Any]] = []
         for m in sliced:
-            entry: dict[str, Any] = {"role": m["role"], "content": m.get("content", "")}
+            content = m.get("content", "")
+            # Inject timestamp into user messages so the LLM can see
+            # when each message was sent (enables time-gap awareness).
+            ts = m.get("timestamp")
+            if m["role"] == "user" and ts and isinstance(content, str):
+                try:
+                    dt = datetime.fromisoformat(ts)
+                    ts_label = dt.strftime("[%m-%d %H:%M]")
+                except (ValueError, TypeError):
+                    ts_label = ""
+                if ts_label:
+                    content = f"{ts_label} {content}"
+            entry: dict[str, Any] = {"role": m["role"], "content": content}
             for k in ("tool_calls", "tool_call_id", "name"):
                 if k in m:
                     entry[k] = m[k]
