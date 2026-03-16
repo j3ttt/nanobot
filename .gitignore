@@ -21,3 +21,7 @@ poetry.lock
 .pytest_cache/
 botpy.log
 .python-version
+.DS_Store
+.idea/
+uv.lock
+test_upload.py

@@ -93,9 +93,11 @@ class SessionManager:
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
+        self.archive_dir = ensure_dir(self.workspace / "archive")
         self.legacy_sessions_dir = get_legacy_sessions_dir()
         self._cache: dict[str, Session] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+
 
     def get_lock(self, key: str) -> asyncio.Lock:
         """Get a per-session asyncio lock."""
@@ -107,6 +109,54 @@ class SessionManager:
         """Get the file path for a session."""
         safe_key = safe_filename(key.replace(":", "_"))
         return self.sessions_dir / f"{safe_key}.jsonl"
+
+    def _get_archive_path(self, key: str) -> Path:
+        """Get the archive file path for a session."""
+        safe_key = safe_filename(key.replace(":", "_"))
+        return self.archive_dir / f"{safe_key}.jsonl"
+
+    def _archive_new_messages(self, session: Session) -> None:
+        """Append new messages to the archive file (append-only, never truncate).
+
+        Uses message timestamps to detect which messages are already archived,
+        so this works correctly even after consolidation truncates the session.
+        """
+        archive_path = self._get_archive_path(session.key)
+
+        # Build a set of already-archived timestamps for dedup
+        archived_timestamps: set[str] = set()
+        if archive_path.exists():
+            try:
+                with open(archive_path, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            data = json.loads(line)
+                            ts = data.get("timestamp")
+                            if ts:
+                                archived_timestamps.add(ts)
+                        except json.JSONDecodeError:
+                            continue
+            except Exception:
+                pass
+
+        # Find messages not yet archived
+        new_messages = [
+            msg for msg in session.messages
+            if msg.get("timestamp") and msg["timestamp"] not in archived_timestamps
+        ]
+        if not new_messages:
+            return
+
+        try:
+            with open(archive_path, "a", encoding="utf-8") as f:
+                for msg in new_messages:
+                    f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+            logger.debug("Archived {} new messages for {}", len(new_messages), session.key)
+        except Exception as e:
+            logger.warning("Failed to archive messages for {}: {}", session.key, e)
 
     def _get_legacy_session_path(self, key: str) -> Path:
         """Legacy global session path (~/.nanobot/sessions/)."""
@@ -182,6 +232,9 @@ class SessionManager:
 
     def save(self, session: Session) -> None:
         """Save a session to disk."""
+        # Archive new messages before saving (append-only, survives consolidation)
+        self._archive_new_messages(session)
+
         path = self._get_session_path(session.key)
 
         with open(path, "w", encoding="utf-8") as f:
